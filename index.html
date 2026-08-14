@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en" data-condition="Dry" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PitVision — Live Track Condition Detector</title>
+  <meta name="description" content="Real-time computer-vision track condition detection with periodic AI verification." />
+</head>
+<body>
+<div class="shell">
+
+  <div class="app" id="top">
+
+    <header class="topbar">
+      <a class="mark" href="#top" aria-label="PitVision">
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M4 22c6-14 18-14 24 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="16" cy="24" r="3.2" fill="currentColor"/>
+        </svg>
+      </a>
+      <div class="brand">
+        <h1>Pit<span>Vision</span></h1>
+        <span class="sub">Live track condition</span>
+      </div>
+      <div class="topbar-status">
+        <span class="pill" id="pill-engine"><span class="dot" id="dot-engine"></span> CV <b id="engine-rate">—</b></span>
+        <span class="pill" id="pill-latency" title="Frame presented → result on screen. p95 over the last ~10s.">latency <b id="engine-latency">—</b></span>
+        <span class="pill" id="pill-source">source <b id="source-label">—</b></span>
+        <span class="pill warn-pill" id="pill-calib" hidden>⚠ not calibrated</span>
+      </div>
+      <button class="theme-toggle" id="btn-theme" aria-label="Toggle light and dark">
+        <span class="theme-knob"></span>
+      </button>
+    </header>
+
+    <section class="entrant" id="entrant"></section>
+
+    <!-- At-a-glance tiles -->
+    <div class="tiles">
+      <div class="tile tile-hero">
+        <div class="k">Surface</div>
+        <div class="tile-cond" id="out-condition">Dry</div>
+        <div class="gauge"><i id="out-gauge" style="width:0%"></i></div>
+      </div>
+      <div class="tile">
+        <div class="k">Wetness index</div>
+        <div class="v mono" id="out-index">0<small>/100</small></div>
+      </div>
+      <div class="tile">
+        <div class="k">Trend</div>
+        <div class="v mono"><span id="out-trend-arrow">→</span> <span id="out-trend">0.0</span><small>/min</small></div>
+      </div>
+      <div class="tile">
+        <div class="k">Racing line</div>
+        <div class="v mono" id="out-line">0</div>
+      </div>
+      <div class="tile">
+        <div class="k">Track edges</div>
+        <div class="v mono" id="out-edge">0</div>
+      </div>
+      <div class="tile tile-call">
+        <div class="k">Tyre call</div>
+        <div class="tile-tyre"><span class="tyre-badge" id="out-tyre">—</span><span id="out-call">Awaiting feed</span></div>
+        <span class="urgency" id="out-urgency" data-u="hold">hold</span>
+      </div>
+    </div>
+
+    <main class="grid">
+      <!-- Left / primary -->
+      <div class="col col-main">
+        <section class="card card-feed" id="sec-feed">
+          <div class="stage" id="stage">
+            <canvas class="layer" id="overlay"></canvas>
+            <canvas class="layer" id="particles"></canvas>
+            <div class="stage-empty" id="stage-empty">
+              <strong>Drop your track footage here</strong>
+              <span>Any MP4 or WebM. It runs a pre-race check, calibrates itself against the clip, then detects continuously.</span>
+              <span class="stage-empty-alt">or <button class="linkbtn" id="btn-demo">use the generated scene</button></span>
+            </div>
+            <div class="stage-hud">
+              <span class="pill glass"><span class="dot live"></span> <b id="hud-condition">Dry</b></span>
+              <span class="pill glass">index <b id="hud-index">0</b></span>
+              <span class="pill glass" id="hud-phase" hidden>scene <b>—</b></span>
+            </div>
+            <div class="stage-foot">
+              <span class="pill glass">line <b id="hud-line">0</b></span>
+              <span class="pill glass">edge <b id="hud-edge">0</b></span>
+              <span class="pill glass">Δ <b id="hud-div">0</b></span>
+            </div>
+          </div>
+          <div class="controls">
+            <span class="btn primary file-btn">Load footage<input type="file" id="file-input" accept="video/*" /></span>
+            <button class="btn" id="btn-play" aria-pressed="false">Play</button>
+            <button class="btn" id="btn-screen">Live: screen</button>
+            <button class="btn" id="btn-camera">Live: camera</button>
+            <input class="text-input" id="url-input" placeholder="…or paste a video URL" />
+            <button class="btn ghost" id="btn-url">Use URL</button>
+            <button class="btn ghost" id="btn-synthetic" aria-pressed="false">Scene: onboard</button>
+            <button class="btn ghost" id="btn-trackside" aria-pressed="false">Scene: trackside</button>
+            <div class="spacer"></div>
+            <button class="btn ghost" id="btn-effects" aria-pressed="false">Effects</button>
+            <button class="btn ghost" id="btn-edit-roi" aria-pressed="false">Edit ROI</button>
+            <button class="btn ghost" id="btn-overlay" aria-pressed="true">Overlay</button>
+            <button class="btn ghost" id="btn-heat" aria-pressed="true">Heatmap</button>
+          </div>
+        </section>
+
+        <section class="card" id="sec-trend">
+          <header>Wetness trend<span class="spacer"></span><span id="trend-rate">—</span></header>
+          <div class="chart">
+            <canvas id="trend"></canvas>
+            <div class="legend">
+              <span><i style="background:var(--accent)"></i> road index</span>
+              <span><i style="background:var(--drying)"></i> racing line</span>
+              <span><i style="background:var(--damp)"></i> track edges</span>
+            </div>
+          </div>
+          <div class="strip-wrap">
+            <div class="strip-label">Timeline <span id="strip-span">last 3 min</span></div>
+            <div class="strip"><canvas id="strip"></canvas></div>
+          </div>
+        </section>
+
+        <section class="card lapdelta" id="sec-lap">
+          <header>Projected lap time<span class="spacer"></span>
+            <label class="baseline-field">dry baseline
+              <input class="text-input tiny-input" id="baseline-input" value="1:32.500" />
+            </label>
+          </header>
+          <div class="body">
+            <div class="lap-grid">
+              <div class="lap-cell">
+                <div class="k">At current condition</div>
+                <div class="v mono" id="lap-projected">—</div>
+                <div class="lap-range" id="lap-range">—</div>
+              </div>
+              <div class="lap-cell">
+                <div class="k">Delta to dry</div>
+                <div class="v mono delta" id="lap-delta">—</div>
+                <div class="lap-range" id="lap-deltarange">—</div>
+              </div>
+              <div class="lap-cell">
+                <div class="k">Tyre</div>
+                <div class="v" id="lap-tyre">—</div>
+              </div>
+            </div>
+            <p class="detail" id="lap-note">—</p>
+          </div>
+        </section>
+      </div>
+
+      <!-- Right / secondary -->
+      <div class="col col-side">
+        <section class="card" id="sec-readout">
+          <header>Strategy<span class="spacer"></span></header>
+          <div class="body suggest-body">
+            <p class="detail" id="out-detail">No frames analysed yet.</p>
+            <div class="diverge">
+              <div class="k">Line vs edge divergence</div>
+              <div class="bar"><span class="mid"></span><i id="out-div-bar"></i></div>
+              <div class="note" id="out-div-note">Uniform surface.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card prerace" id="prerace-card">
+          <header>Pre-race check<span class="spacer"></span><span class="tag" id="prerace-verdict">not run</span></header>
+          <div class="body">
+            <div class="checks" id="prerace-list"></div>
+            <div class="row">
+              <button class="btn" id="btn-prerace">Run check &amp; calibrate</button>
+              <button class="btn ghost" id="btn-recalib">Re-calibrate</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card alerts-card" id="sec-pings">
+          <header>Pit wall pings<span class="spacer"></span>
+            <button class="btn ghost tiny" id="btn-sound" aria-pressed="false">Sound off</button>
+            <span class="tag" id="alert-count">—</span>
+          </header>
+          <div class="body"><div class="alert-list" id="alert-list"></div></div>
+        </section>
+
+        <section class="card verify" id="sec-verify">
+          <header>AI verification<span class="spacer"></span><span class="tag" id="verify-status">idle</span></header>
+          <div class="body">
+            <div class="headline">
+              <span class="tag" id="verify-verdict">not yet run</span>
+              <button class="btn ghost" id="btn-verify">Verify now</button>
+            </div>
+            <p class="reasoning" id="verify-reasoning">
+              A vision model double-checks the CV engine's read every few seconds. It is a second
+              opinion — the detection itself is ours.
+            </p>
+            <div class="meta" id="verify-meta"></div>
+          </div>
+        </section>
+
+        <section class="card" id="sec-signals">
+          <header>Signal breakdown<span class="spacer"></span><span>normalised</span></header>
+          <div class="body signals" id="signals"></div>
+        </section>
+      </div>
+    </main>
+
+    <details class="panel" id="cal-panel">
+      <summary>Calibration &amp; ROI<span class="spacer"></span><span id="cal-state">defaults</span></summary>
+      <div class="panel-body" id="cal-body"></div>
+    </details>
+
+    <footer class="foot">
+      <span>Detection: in-browser CV — specular glare, Laplacian texture variance, luma darkness, highlight spread.</span>
+      <span>Verification: Anthropic vision model via server-side proxy.</span>
+    </footer>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

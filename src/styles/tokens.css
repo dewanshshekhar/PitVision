@@ -1,0 +1,126 @@
+/* PitVision design tokens — single source of truth for colour, type, space and motion. */
+:root {
+  /* Surface ramp.
+     Broadcast graphics sit on near-black so the accent colour carries the
+     meaning. Panels are translucent over it rather than opaque, which is what
+     gives the glass depth without turning into a blur soup. */
+  --bg: #05060a;
+  --bg-grad:
+    radial-gradient(900px 620px at 12% -8%, rgba(56, 108, 235, 0.16), transparent 62%),
+    radial-gradient(760px 520px at 92% 4%, rgba(225, 6, 0, 0.12), transparent 58%),
+    linear-gradient(180deg, #0a0c12 0%, #05060a 55%);
+  --surface: rgba(18, 22, 30, 0.62);
+  --surface-2: rgba(24, 29, 39, 0.58);
+  --surface-3: rgba(32, 39, 51, 0.72);
+  --glass-blur: 18px;
+  --line: rgba(148, 168, 200, 0.12);
+  --line-strong: rgba(148, 168, 200, 0.24);
+  /* Formula 1 red — used only for live/critical states, never as decoration. */
+  --f1: #e10600;
+
+  /* Text */
+  --text: #eef2f7;
+  --text-2: #97a3b4;
+  --text-3: #5f6b7c;
+
+  /* Condition accents — a single ramp from baked-dry to standing water. */
+  --sunny: #ffd34d;
+  --dry: #ffb020;
+  --greasy: #c9d152;
+  --drying: #46e08a;
+  --damp: #38bdf8;
+  --wet: #4f7cff;
+  --flooded: #7b5cff;
+
+  /* Semantic */
+  --accent: var(--dry);
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 42%, transparent);
+  --danger: #ff5c5c;
+  --ok: #46e08a;
+  --warn: #ffb020;
+
+  /* Type */
+  --font: ui-sans-serif, -apple-system, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  --fs-micro: 10px;
+  --fs-xs: 11px;
+  --fs-sm: 12.5px;
+  --fs-md: 14px;
+  --fs-lg: 17px;
+  --fs-xl: 22px;
+  --fs-hero: clamp(52px, 7vw, 86px);
+
+  /* Space */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 22px;
+  --s6: 30px;
+
+  --r1: 6px;
+  --r2: 10px;
+  --r3: 14px;
+  --r4: 20px;
+
+  --ease: cubic-bezier(0.22, 0.68, 0.32, 1);
+  --dur: 260ms;
+
+  --shadow: 0 18px 44px -22px rgba(0, 0, 0, 0.9);
+  --track: 1px;
+}
+
+:root[data-condition="Sunny"] { --accent: var(--sunny); }
+:root[data-condition="Dry"] { --accent: var(--dry); }
+:root[data-condition="Greasy"] { --accent: var(--greasy); }
+:root[data-condition="Drying"] { --accent: var(--drying); }
+:root[data-condition="Damp"] { --accent: var(--damp); }
+:root[data-condition="Wet"] { --accent: var(--wet); }
+:root[data-condition="Flooded"] { --accent: var(--flooded); }
+
+/* Light theme.
+   Glass on a light ground needs the opposite treatment: the panels go *lighter*
+   than the page rather than darker, the rim highlight drops sharply (there is
+   less contrast to catch), and the drop shadow does the work of separating
+   layers instead of the border. */
+:root[data-theme="light"] {
+  --bg: #eef1f6;
+  --bg-grad:
+    radial-gradient(900px 620px at 12% -8%, rgba(56, 108, 235, 0.14), transparent 62%),
+    radial-gradient(760px 520px at 92% 4%, rgba(225, 6, 0, 0.09), transparent 58%),
+    linear-gradient(180deg, #f6f8fb 0%, #e7ebf2 60%);
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-2: rgba(255, 255, 255, 0.62);
+  --surface-3: rgba(255, 255, 255, 0.9);
+  --line: rgba(18, 32, 56, 0.1);
+  --line-strong: rgba(18, 32, 56, 0.18);
+  --text: #10141c;
+  --text-2: #4a5568;
+  --text-3: #7b8798;
+  --shadow: 0 20px 44px -26px rgba(20, 32, 56, 0.4);
+}
+:root[data-theme="light"] .card,
+:root[data-theme="light"] .tile,
+:root[data-theme="light"] .glass {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 18px 40px -26px rgba(20, 32, 56, 0.45);
+}
+:root[data-theme="light"] .card::after,
+:root[data-theme="light"] .tile::after,
+:root[data-theme="light"] .glass::after {
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(18, 32, 56, 0.08) 30%,
+    transparent 55%,
+    rgba(18, 32, 56, 0.06) 100%
+  );
+}
+:root[data-theme="light"] .stage { background: #0b0d12; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur: 1ms; }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "pitvision",
+  "private": true,
+  "version": "3.0.0",
+  "type": "module",
+  "description": "PitVision — live track condition detector. Real-time CV engine + periodic AI verification.",
+  "scripts": {
+    "dev": "concurrently -n web,api -c cyan,magenta \"npm:dev:web\" \"npm:dev:api\"",
+    "dev:web": "vite",
+    "dev:api": "node server/proxy.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "start": "node server/proxy.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
+  }
+}

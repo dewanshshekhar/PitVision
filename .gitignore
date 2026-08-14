@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.local
+.DS_Store
+# Demo clips are large and belong out of git — drop them in public/footage/
+public/footage/*
+!public/footage/.gitkeep
