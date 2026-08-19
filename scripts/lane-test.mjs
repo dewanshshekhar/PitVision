@@ -276,5 +276,63 @@ section('Kerbs, markings and bodywork do not pull it off the tarmac');
   }
 }
 
+// ── Standing water, which is the thing it exists to measure ────────────
+section('A sheet of standing water does not truncate the trace');
+{
+  // Water reflecting the sky is far brighter than the dry tarmac a few metres
+  // nearer. The scan carries a brightness reference from the row below, and a
+  // band that spans the full width across several rows accepts nothing — so
+  // the reference never adapts and the trace used to stop dead, precisely at
+  // the standing water it exists to measure.
+  const leftAt = (t) => 0.5 - (0.07 + 0.28 * t);
+  const rightAt = (t) => 0.5 + (0.07 + 0.28 * t);
+  const dry = scene({ leftAt, rightAt });
+
+  const { img } = scene({ leftAt, rightAt });
+  const data = img.data;
+  for (let y = 0; y < H; y++) {
+    const ny = y / H;
+    if (ny < 0.50 || ny > 0.66) continue;
+    const t = (ny - 0.36) / (1 - 0.36);
+    const x0 = Math.round(leftAt(t) * W);
+    const x1 = Math.round(rightAt(t) * W);
+    for (let x = Math.max(0, x0); x <= Math.min(W - 1, x1); x++) {
+      const i = (y * W + x) * 4;
+      // Bright, near-colourless, and smooth — a mirror of the sky.
+      const v = 236 + (rnd() - 0.5) * 6;
+      data[i] = v; data[i + 1] = v; data[i + 2] = v * 1.01;
+    }
+  }
+
+  const wet = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('the wet road is still traced', wet !== null);
+  if (wet && dry.trace) {
+    check(
+      'the trace spans the water rather than stopping at it',
+      wet.yBot - wet.yTop > (dry.trace.yBot - dry.trace.yTop) * 0.8,
+      `wet span ${(wet.yBot - wet.yTop).toFixed(3)} vs dry ${(dry.trace.yBot - dry.trace.yTop).toFixed(3)}`,
+    );
+    check(
+      'the water is inside the corridor, not outside it',
+      wet.yTop <= 0.50 && wet.yBot >= 0.66,
+      `corridor ${wet.yTop.toFixed(2)}–${wet.yBot.toFixed(2)}, water 0.50–0.66`,
+    );
+  }
+
+  // The other half of the same trade: relaxing brightness must not let a
+  // blown-out sky in, because that is desaturated too.
+  const blown = scene({ leftAt, rightAt });
+  const bd = blown.img.data;
+  for (let y = 0; y < Math.floor(0.36 * H); y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      bd[i] = 255; bd[i + 1] = 255; bd[i + 2] = 255;
+    }
+  }
+  const skyTrace = traceLane(blown.img, DEFAULT_TRACE_OPTIONS);
+  check('a blown-out sky is still excluded', skyTrace !== null && skyTrace.yTop >= 0.36,
+    skyTrace ? `yTop ${skyTrace.yTop.toFixed(3)}` : 'no trace');
+}
+
 console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m\n`);
 process.exit(failed === 0 ? 0 : 1);

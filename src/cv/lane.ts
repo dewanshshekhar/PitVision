@@ -270,11 +270,20 @@ function findSeed(img: ImageData, opts: TraceOptions): Seed | null {
 function scanRow(
   y: number,
   seedX: number,
-  reference: number,
+  seedReference: number,
   w: number,
   opts: TraceOptions,
+  /**
+   * Width of the previous row, in pixels, or 0 at the seed.
+   *
+   * Only consulted when the brightness anchor has been given up (see below).
+   * Perspective changes the road's width smoothly and slowly between adjacent
+   * sampled rows; a scene opening out into sky does not.
+   */
+  prevWidth: number,
 ): { l: number; r: number; sumL: number; sumS: number; n: number } | null {
   let cx = seedX;
+  let reference = seedReference;
   const luma = lumaBuf!;
   const sat = satBuf!;
   const row = y * w;
@@ -308,8 +317,58 @@ function scanRow(
       if (cx - d >= 1 && test(cx - d) === 2) { recovered = cx - d; break; }
       if (cx + d <= w - 2 && test(cx + d) === 2) { recovered = cx + d; break; }
     }
-    if (recovered < 0) return null;
-    cx = recovered;
+
+    if (recovered >= 0) {
+      cx = recovered;
+    } else {
+      // Nothing within reach matches the carried brightness — but the road may
+      // still be right here and simply be a different brightness than the row
+      // below it. That is not a corner case on a wet track, it is the normal
+      // case: a sheet of water reflecting the sky is far brighter than the dry
+      // tarmac a few metres nearer, and a shadow is far darker. The reference
+      // adapts row to row, but only from accepted pixels, so a band that
+      // spans the full width across several rows accepts nothing and the
+      // reference never moves. The trace then stops dead — precisely at the
+      // standing water it exists to measure.
+      //
+      // Saturation is the test that still holds when brightness does not.
+      // Asphalt is near-colourless whether it is wet, dry, sunlit or shadowed;
+      // grass, kerbing and bodywork are not. So when brightness continuity
+      // fails but the material test still passes across a real span, trust the
+      // material and re-baseline the brightness to what is actually here.
+      let lo = cx;
+      let hi = cx;
+      while (lo > 1 && sat[row + lo - 1] <= opts.maxSat) lo--;
+      while (hi < w - 2 && sat[row + hi + 1] <= opts.maxSat) hi++;
+
+      // Demand a real span before re-baselining. A couple of desaturated
+      // pixels is a highlight on a kerb, not a road surface.
+      if (hi - lo < Math.max(6, w * 0.05)) return null;
+
+      // Saturation alone is not enough here, and this is the trap: a
+      // blown-out white sky is *also* near-colourless. Relaxing brightness
+      // continuity to survive standing water opens the door to the sky
+      // directly above it, and the trace walks straight up into it — which is
+      // the one failure this whole region exists to prevent.
+      //
+      // Having given up the brightness anchor, the row needs a different one,
+      // and geometry is the natural choice. Perspective changes the road's
+      // width smoothly between adjacent sampled rows — a few per cent across
+      // 48 rows. A scene opening out into sky does not: it jumps. So a
+      // re-baselined row may not be much wider than the row it grew from.
+      const cap = prevWidth > 0 ? prevWidth * 1.6 : w * 0.55;
+      if (hi - lo > cap) return null;
+
+      let sum = 0;
+      let count = 0;
+      for (let x = lo; x <= hi; x++) {
+        sum += luma[row + x];
+        count++;
+      }
+      reference = sum / count;
+      cx = Math.round((lo + hi) / 2);
+      if (test(cx) !== 2) return null;
+    }
   }
 
   const walk = (from: number, step: number, limit: number) => {
@@ -428,9 +487,10 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
     let cx = seed.x;
     let reference = seed.luma;
     let misses = 0;
+    let prevWidth = 0;
 
     for (let i = from; step > 0 ? i <= to : i >= to; i += step) {
-      const hit = scanRow(rowY[i], cx, reference, w, opts);
+      const hit = scanRow(rowY[i], cx, reference, w, opts, prevWidth);
       if (!hit) {
         // Several consecutive failures mean the surface has genuinely ended —
         // the horizon above, the car's bodywork below. Keep going a little in
@@ -453,6 +513,7 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
       // what makes it follow a corner: the search for each row starts where the
       // road was one row closer, not where a fixed shape says it should be.
       cx = Math.round((hit.l + hit.r) / 2);
+      prevWidth = hit.r - hit.l;
       reference = reference * 0.6 + (hit.sumL / hit.n) * 0.4;
     }
   };
