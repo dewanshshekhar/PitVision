@@ -38,7 +38,8 @@ export type IncidentKind =
   | 'verification_down'
   | 'condition_instability'
   | 'rapid_wetting'
-  | 'calibration_mismatch';
+  | 'calibration_mismatch'
+  | 'lane_lost';
 
 interface Flip {
   at: number;
@@ -66,6 +67,10 @@ class SessionState {
   sourceSignature: string | null = null;
   calibrationSignature: string | null = null;
   everHadReading = false;
+  laneState: string | null = null;
+  laneConfidence = 0;
+  /** When the lane was last reported lost, so a momentary loss is not an incident. */
+  laneLostSince = 0;
   readonly sessionId: string;
 
   constructor(sessionId: string) {
@@ -136,12 +141,21 @@ export class Monitor {
     sessionId: string,
     rows: { t: number; condition: Condition; trend: number; latencyMs?: number }[],
     sourceSignature?: string,
+    lane?: { state: string; confidence: number },
   ) {
     if (rows.length === 0) return;
     const s = this.state(sessionId);
     s.lastReadingAt = Date.now();
     s.everHadReading = true;
     if (sourceSignature) s.sourceSignature = sourceSignature;
+
+    if (lane) {
+      s.laneState = lane.state;
+      s.laneConfidence = lane.confidence;
+      const bad = lane.state === 'lost' || lane.state === 'searching';
+      if (bad && s.laneLostSince === 0) s.laneLostSince = Date.now();
+      if (!bad) s.laneLostSince = 0;
+    }
 
     for (const r of rows) {
       if (r.t > s.lastReadingT) s.lastReadingT = r.t;
@@ -195,6 +209,7 @@ export class Monitor {
         this.checkInstability(session);
         this.checkSurge(session);
         this.checkCalibration(session);
+        this.checkLane(session, now);
         this.checkVerification(session.id);
       }
       openIncidents = this.store.allOpenIncidents().length;
@@ -330,6 +345,41 @@ export class Monitor {
    * ran on foreign anchors is what makes those numbers interpretable later,
    * instead of quietly wrong.
    */
+  /**
+   * The detector has lost the road.
+   *
+   * This is the most consequential of these checks and the least obvious from
+   * the readout. Every other failure mode either stops the numbers or makes
+   * them visibly wrong; this one keeps them flowing, correctly computed, over a
+   * region that is no longer the track — a corridor left over from before the
+   * camera cut away, or one that never locked on at all. The index stays in
+   * range, the trend stays smooth, and it is describing a pit wall.
+   *
+   * Held for a few seconds first: a car crossing the frame or a burst of spray
+   * loses the trace briefly and the client already carries the last corridor
+   * through that, which is the correct behaviour and not worth an alarm.
+   */
+  private checkLane(session: SessionRow, now: number) {
+    const s = this.state(session.id);
+    if (s.laneState === null || s.laneState === 'manual') {
+      this.close(session.id, 'lane_lost');
+      return;
+    }
+
+    const lostFor = s.laneLostSince === 0 ? 0 : now - s.laneLostSince;
+    if (lostFor > this.th.laneLostMs) {
+      this.open(session.id, 'lane_lost', 'critical', 'Road not being traced', {
+        detail:
+          `The lane tracer has been ${s.laneState} for ${(lostFor / 1000).toFixed(1)}s. ` +
+          `Readings are still arriving, but they are measured through the last known region — ` +
+          `which may no longer be track. Check the overlay before acting on the index.`,
+        payload: { state: s.laneState, confidence: s.laneConfidence, lostForMs: lostFor },
+      });
+    } else {
+      this.close(session.id, 'lane_lost');
+    }
+  }
+
   private checkCalibration(session: SessionRow) {
     const s = this.state(session.id);
     if (!s.sourceSignature || !s.calibrationSignature) return;

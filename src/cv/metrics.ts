@@ -1,5 +1,5 @@
 import type { BandMetrics, FrameMetrics } from '../types';
-import { bandSpan, roadBounds, SUB_BANDS, type RoadGeometry } from './rois';
+import { bandSpan, roadBounds, SUB_BANDS, type Corridor } from './rois';
 
 export interface GlareThresholds {
   /** Minimum normalised luma for a pixel to count as specular */
@@ -84,7 +84,7 @@ function percentile(hist: Int32Array, total: number, p: number): number {
  */
 export function analyseFrame(
   img: ImageData,
-  road: RoadGeometry,
+  corridor: Corridor,
   glare: GlareThresholds,
   heatW = 30,
   heatH = 16,
@@ -100,7 +100,7 @@ export function analyseFrame(
   // Scanning the whole frame was ~4x more work than the detector uses: on a
   // trackside shot most of the image is sky, barriers and run-off that no band
   // ever samples.
-  const bounds = roadBounds(road, w, h);
+  const bounds = roadBounds(corridor, w, h);
   for (let y = bounds.y0; y <= bounds.y1; y++) {
     const row = y * w;
     for (let x = bounds.x0; x <= bounds.x1; x++) {
@@ -129,7 +129,7 @@ export function analyseFrame(
     let lapN = 0;
 
     for (let y = 1; y < h - 1; y++) {
-      const span = bandSpan(road, band, y, w, h);
+      const span = bandSpan(corridor, band, y, w, h);
       if (!span) continue;
       const [x0, x1] = span;
       const row = y * w;
@@ -179,7 +179,7 @@ export function analyseFrame(
   const cellLuma = cellLumaBuf!.fill(0);
 
   for (let y = 1; y < h - 1; y++) {
-    const span = bandSpan(road, roadBand, y, w, h);
+    const span = bandSpan(corridor, roadBand, y, w, h);
     if (!span) continue;
     const [x0, x1] = span;
     const cy = Math.min(heatH - 1, ((y / h) * heatH) | 0);

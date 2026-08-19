@@ -1,7 +1,7 @@
 import type { FrameMetrics } from '../types';
 import type { Calibration } from '../cv/calibration';
 import { normalise } from '../util/math';
-import { bandCorners, roadCorners, SUB_BANDS, type RoadGeometry } from '../cv/rois';
+import { bandOutline, roadCorners, SUB_BANDS, corridorFromRoad, type Corridor, type RoadGeometry } from '../cv/rois';
 import { coverTransform, fitCanvas } from '../util/dom';
 
 const BAND_STYLE: Record<string, { stroke: string; label: string }> = {
@@ -110,6 +110,17 @@ export class Overlay {
     this.canvas.addEventListener('pointercancel', release);
   }
 
+  /**
+   * The corridor the detector last measured through.
+   *
+   * Set by the caller each frame. The overlay must draw the region that was
+   * actually sampled, not the one in the calibration — with tracing on those
+   * are different shapes, and showing the wrong one turns the only way anyone
+   * has of checking the region is on the tarmac into a source of false
+   * reassurance.
+   */
+  corridor: Corridor | null = null;
+
   draw(metrics: FrameMetrics | null, cal: Calibration, srcW: number, srcH: number) {
     const { w, h } = fitCanvas(this.canvas);
     const ctx = this.ctx;
@@ -123,6 +134,8 @@ export class Overlay {
 
     if (this.showHeat) this.drawHeat(metrics, cal, ox, oy, sw, sh);
     if (this.showRois || this.editing) this.drawRois(cal, toX, toY);
+    // Handles belong to the hand-placed trapezoid, so while editing the manual
+    // shape is shown regardless of what the tracer is doing.
     if (this.editing) this.drawHandles(cal, toX, toY);
   }
 
@@ -194,44 +207,56 @@ export class Overlay {
 
   private drawRois(cal: Calibration, toX: (n: number) => number, toY: (n: number) => number) {
     const ctx = this.ctx;
+    // While editing, the operator is moving the trapezoid, so that is what is
+    // drawn. Otherwise draw whatever was measured through.
+    const corridor = this.editing || !this.corridor ? corridorFromRoad(cal.road) : this.corridor;
 
-    // Road envelope
-    const road = roadCorners(cal.road, 1, 1);
+    const path = (pts: { x: number; y: number }[]) => {
+      ctx.beginPath();
+      pts.forEach((p, i) => (i ? ctx.lineTo(toX(p.x), toY(p.y)) : ctx.moveTo(toX(p.x), toY(p.y))));
+      ctx.closePath();
+    };
+
+    // Track limits — where the trace says the tarmac stops.
     ctx.save();
-    ctx.strokeStyle = 'rgba(238,242,247,0.28)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = corridor.traced ? 'rgba(70,224,138,0.5)' : 'rgba(238,242,247,0.28)';
+    ctx.lineWidth = corridor.traced ? 1.4 : 1;
     ctx.setLineDash([5, 5]);
-    ctx.beginPath();
-    road.forEach((p, i) => (i ? ctx.lineTo(toX(p.x), toY(p.y)) : ctx.moveTo(toX(p.x), toY(p.y))));
-    ctx.closePath();
+    path(bandOutline(corridor, SUB_BANDS[0], 1, 1));
     ctx.stroke();
     ctx.restore();
 
     for (const band of SUB_BANDS) {
       const style = BAND_STYLE[band.name];
       if (!style) continue;
-      const pts = bandCorners(cal.road, band, 1, 1);
+      const pts = bandOutline(corridor, band, 1, 1);
+      if (pts.length < 4) continue;
+
       ctx.save();
       ctx.strokeStyle = style.stroke;
       ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      pts.forEach((p, i) => (i ? ctx.lineTo(toX(p.x), toY(p.y)) : ctx.moveTo(toX(p.x), toY(p.y))));
-      ctx.closePath();
+      path(pts);
       ctx.stroke();
 
-      // Label low in the band, not at the horizon: up there the three
-      // trapezoids converge and the captions overlap into an unreadable smear.
-      const k = 0.72;
-      const lx = toX(pts[0].x + (pts[3].x - pts[0].x) * k);
-      const rx = toX(pts[1].x + (pts[2].x - pts[1].x) * k);
-      const ly = toY(pts[0].y + (pts[3].y - pts[0].y) * k);
+      // Label low in the band, not at the horizon: up there the three bands
+      // converge and the captions overlap into an unreadable smear.
+      //
+      // The outline runs down the left side and back up the right, so the
+      // point at index k on the way down pairs with the one k from the end on
+      // the way back.
+      const half = pts.length / 2;
+      const k = Math.min(half - 1, Math.floor(half * 0.72));
+      const l = pts[k];
+      const r = pts[pts.length - 1 - k];
       ctx.font = '600 10px ui-monospace, monospace';
       ctx.textAlign = 'center';
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(6,7,10,0.85)';
-      ctx.strokeText(style.label, (lx + rx) / 2, ly);
+      const cx = toX((l.x + r.x) / 2);
+      const cy = toY((l.y + r.y) / 2);
+      ctx.strokeText(style.label, cx, cy);
       ctx.fillStyle = style.stroke;
-      ctx.fillText(style.label, (lx + rx) / 2, ly);
+      ctx.fillText(style.label, cx, cy);
       ctx.restore();
     }
   }

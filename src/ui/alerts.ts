@@ -3,7 +3,15 @@ import type { Calibration } from '../cv/calibration';
 import { el } from '../util/dom';
 import { CONDITION_COLOUR } from './strip';
 
-export type AlertKind = 'condition' | 'crossover' | 'surge' | 'ai' | 'system';
+/**
+ * `monitor` is the odd one out: every other kind is something that happened on
+ * the track, and a monitor ping is something that happened to the *detector* —
+ * a stalled feed, anchors from the wrong footage, the vision model
+ * contradicting the read. It shares the feed because a strategist has one place
+ * they look, and "the number you are about to act on is not trustworthy" is at
+ * least as urgent as the number changing.
+ */
+export type AlertKind = 'condition' | 'crossover' | 'surge' | 'ai' | 'system' | 'monitor';
 export type AlertLevel = 'info' | 'warn' | 'critical';
 
 export interface Alert {

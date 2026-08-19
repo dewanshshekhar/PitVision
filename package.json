@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "start": "node --disable-warning=ExperimentalWarning server/index.ts",
     "typecheck": "tsc --noEmit && tsc -p server --noEmit",
-    "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.mjs"
+    "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.mjs",
+    "test:lane": "node --disable-warning=ExperimentalWarning scripts/lane-test.mjs",
+    "test": "npm run typecheck && npm run test:lane && npm run smoke"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.118.0",

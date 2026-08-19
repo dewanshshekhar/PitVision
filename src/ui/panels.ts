@@ -208,6 +208,24 @@ export function buildCalibrationPanel(root: HTMLElement, state: HTMLElement, dep
     syncs.push(s.sync);
     roiGroup.append(s.node);
   }
+  // Automatic tracing sits above the manual sliders because it is what runs by
+  // default; the sliders below are the override for a camera it cannot read.
+  const laneToggle = el('button', { class: 'btn' }, '') as HTMLButtonElement;
+  const syncLane = () => {
+    const on = cal().laneAuto;
+    laneToggle.textContent = on ? 'Trace road automatically: on' : 'Trace road automatically: off';
+    laneToggle.setAttribute('aria-pressed', String(on));
+  };
+  laneToggle.addEventListener('click', () => { cal().laneAuto = !cal().laneAuto; commit(); syncLane(); });
+  syncs.push(syncLane);
+  roiGroup.prepend(
+    laneToggle,
+    el('p', { class: 'hint' },
+      'On, the road is found and followed every frame and only that surface is measured — ' +
+      'the sliders below are ignored. Turn it off to aim the region by hand, which is the ' +
+      'answer for a camera the tracer cannot read.'),
+  );
+
   roiGroup.append(
     el('p', { class: 'hint' }, 'Keep the trapezoid on tarmac only. Sky, barriers and grass will poison every signal.'),
   );

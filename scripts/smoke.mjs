@@ -85,6 +85,7 @@ function startServer(port, dbName, extraEnv = {}) {
         PITVISION_INSTABILITY_WINDOW_MS: '30000',
         PITVISION_LATENCY_BUDGET_MS: '100',
         PITVISION_SURGE_PER_MIN: '14',
+        PITVISION_LANE_LOST_MS: '1500',
         NODE_ENV: 'test',
         ...extraEnv,
       },
@@ -385,6 +386,130 @@ async function run() {
     const streamed = await pushed;
     check('a new reading is pushed to subscribers', streamed.includes('event: reading'), streamed.slice(0, 120));
     controller.abort();
+  }
+
+  section('A lost lane trace is caught');
+  {
+    // The failure mode with no visible symptom: readings keep arriving,
+    // correctly computed, over a region that is no longer the track.
+    const created = await api('POST', '/sessions', {
+      source: { kind: 'screen', label: 'lane-loss', signature: 'sig-lane' },
+    });
+    const laneId = created.body.session.id;
+
+    const post = (state) =>
+      api('POST', `/sessions/${laneId}/readings`, {
+        readings: [reading(Date.now(), { wetness: 30, condition: 'Damp' })],
+        sourceSignature: 'sig-lane',
+        lane: { state, confidence: state === 'locked' ? 0.9 : 0 },
+      });
+
+    await post('locked');
+    await sleep(600);
+    let open = await api('GET', `/sessions/${laneId}/incidents?open=true`);
+    check('a locked trace raises nothing', !open.body?.incidents?.some((i) => i.kind === 'lane_lost'));
+
+    // Lose it and hold it lost past the threshold.
+    for (let i = 0; i < 5; i++) {
+      await post('lost');
+      await sleep(500);
+    }
+    open = await api('GET', `/sessions/${laneId}/incidents?open=true`);
+    check(
+      'a sustained loss opens a critical incident',
+      open.body?.incidents?.some((i) => i.kind === 'lane_lost' && i.severity === 'critical'),
+      JSON.stringify(open.body?.incidents?.map((i) => i.kind)),
+    );
+
+    await post('locked');
+    await sleep(700);
+    open = await api('GET', `/sessions/${laneId}/incidents?open=true`);
+    check('regaining the road closes it', !open.body?.incidents?.some((i) => i.kind === 'lane_lost'));
+
+    // A hand-aimed region is not a lost trace and must not be reported as one.
+    await api('POST', `/sessions/${laneId}/readings`, {
+      readings: [reading(Date.now(), { wetness: 30, condition: 'Damp' })],
+      lane: { state: 'manual', confidence: 0 },
+    });
+    await sleep(600);
+    open = await api('GET', `/sessions/${laneId}/incidents?open=true`);
+    check('a manual ROI is not reported as a lost trace', !open.body?.incidents?.some((i) => i.kind === 'lane_lost'));
+
+    const bad = await api(
+      'POST',
+      `/sessions/${laneId}/readings`,
+      {
+        readings: [reading(Date.now(), { wetness: 30, condition: 'Damp' })],
+        lane: { state: 'confused', confidence: 0 },
+      },
+      { allowError: true },
+    );
+    check('an unknown lane state is rejected', bad.status === 400);
+
+    await api('POST', `/sessions/${laneId}/end`, { reason: 'lane test done' });
+  }
+
+  section('Incidents reach subscribers live');
+  {
+    // The reason the monitor exists is that somebody is told. This is the wire
+    // between the two: the browser tab running the detector subscribes to its
+    // own session and turns these frames into pit-wall pings.
+    const created = await api('POST', '/sessions', {
+      source: { kind: 'video', label: 'incident-stream.mp4', signature: 'sig-inc' },
+    });
+    const incId = created.body.session.id;
+
+    await api('POST', `/sessions/${incId}/readings`, {
+      readings: [reading(Date.now(), { wetness: 20, condition: 'Greasy' })],
+      sourceSignature: 'sig-inc',
+    });
+
+    const controller = new AbortController();
+    const res = await fetch(`${BASE}/sessions/${incId}/stream`, { signal: controller.signal });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    /** Read frames until `event: <name>` shows up, or time out. */
+    async function until(eventName, ms) {
+      const deadline = Date.now() + ms;
+      let buffer = '';
+      while (Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.includes(`event: ${eventName}`)) return buffer;
+      }
+      return null;
+    }
+
+    // Stop posting readings: the stall watchdog fires at 1500ms in this config.
+    const opened = await until('incident.opened', 8000);
+    check('an opened incident is pushed to subscribers', opened !== null);
+    check(
+      'the frame carries the kind and severity a client needs to render it',
+      opened !== null && /"kind":"feed_stall"/.test(opened) && /"severity":"critical"/.test(opened),
+      opened?.slice(-160),
+    );
+    check(
+      'it carries the detail explaining what is wrong',
+      opened !== null && /"detail":"[^"]+/.test(opened),
+    );
+
+    // Resume the feed; the incident must close itself and say so on the wire,
+    // or a client would leave the warning on screen forever.
+    await api('POST', `/sessions/${incId}/readings`, {
+      readings: [reading(Date.now(), { wetness: 20, condition: 'Greasy' })],
+    });
+    const closed = await until('incident.closed', 8000);
+    check('the matching close is pushed too', closed !== null);
+    check(
+      'the closed frame carries closed_at, so a client can show how long it held',
+      closed !== null && /"closed_at":\d+/.test(closed),
+      closed?.slice(-160),
+    );
+
+    controller.abort();
+    await api('POST', `/sessions/${incId}/end`, { reason: 'incident stream test done' });
   }
 
   section('Rate limiting protects the paid endpoint');

@@ -46,8 +46,22 @@ export interface SessionReport {
   };
   coverage: {
     readings: number;
+    /**
+     * The span the readings actually cover: last timestamp minus first.
+     *
+     * This is not the same as `session.durationMs`, and conflating them
+     * produced a report that contradicted itself. `session.durationMs` is how
+     * long the session *record* was open — wall clock. The readings carry the
+     * timestamps of the footage being analysed, and on a loaded clip those two
+     * clocks are unrelated: a 22-minute clip scanned in seconds gave a headline
+     * reading "0.1 min session, 1320 readings", which is 220 Hz and impossible.
+     *
+     * Everything about the *track* is measured against this span. Everything
+     * about the *session* stays on wall clock.
+     */
+    spanMs: number;
     expectedAtOneHz: number;
-    /** Fraction of the session actually covered by readings. Gaps show here. */
+    /** Fraction of the span actually covered by readings. Gaps show here. */
     ratio: number;
     largestGapMs: number;
     firstReadingAt: number | null;
@@ -207,7 +221,8 @@ function computeCoverage(readings: ReadingRow[], durationMs: number): SessionRep
   if (readings.length === 0) {
     return {
       readings: 0,
-      expectedAtOneHz: Math.round(durationMs / 1000),
+      spanMs: 0,
+      expectedAtOneHz: 0,
       ratio: 0,
       largestGapMs: durationMs,
       firstReadingAt: null,
@@ -218,14 +233,22 @@ function computeCoverage(readings: ReadingRow[], durationMs: number): SessionRep
   for (let i = 1; i < readings.length; i++) {
     largestGap = Math.max(largestGap, readings[i].t - readings[i - 1].t);
   }
-  const expected = Math.max(1, Math.round(durationMs / 1000));
+  const first = readings[0].t;
+  const last = readings[readings.length - 1].t;
+  const spanMs = Math.max(0, last - first);
+  // Coverage is measured against the span the readings themselves cover, not
+  // against how long the session record was open. Against wall clock, a clip
+  // analysed faster than real time reports impossible coverage, and one
+  // analysed slower reports a gap that is not there.
+  const expected = Math.max(1, Math.round(spanMs / 1000));
   return {
     readings: readings.length,
+    spanMs,
     expectedAtOneHz: expected,
     ratio: Math.min(1, readings.length / expected),
     largestGapMs: largestGap,
-    firstReadingAt: readings[0].t,
-    lastReadingAt: readings[readings.length - 1].t,
+    firstReadingAt: first,
+    lastReadingAt: last,
   };
 }
 
@@ -476,14 +499,16 @@ function computeEvents(events: ReturnType<Store['events']>): SessionReport['even
  */
 function headline(r: SessionReport): string[] {
   const lines: string[] = [];
-  const mins = (r.session.durationMs / 60000).toFixed(1);
 
   if (r.coverage.readings === 0) {
     return ['Session recorded no readings — the feed never produced an analysed frame.'];
   }
 
+  // Footage analysed, not wall clock. On a loaded clip the two differ, and the
+  // sentence is about what the track did.
+  const mins = (r.coverage.spanMs / 60000).toFixed(1);
   lines.push(
-    `${mins} min session, ${r.coverage.readings} readings, ` +
+    `${mins} min of footage analysed, ${r.coverage.readings} readings, ` +
       `${r.conditions.dominant ?? 'unknown'} for ${r.conditions.timeIn[r.conditions.dominant ?? '']?.pct ?? 0}% of it.`,
   );
   lines.push(

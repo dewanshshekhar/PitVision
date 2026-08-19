@@ -53,6 +53,7 @@ question that has a wrong answer the UI would show confidently:
 | `condition_instability` | 6+ condition changes in 30s | Hysteresis is not holding — contradictory tyre calls |
 | `calibration_mismatch` | Feed signature ≠ calibration signature | Readings are not comparable with this footage |
 | `rapid_wetting` | Sustained trend over 14 index points/min | Weather, not infrastructure — compound change territory |
+| `lane_lost` | The tracer has been lost for over 5s | Readings still arrive, measured through a region that may no longer be track |
 
 Every one closes itself when the condition clears. A monitor that only ever
 raises alarms gets muted within a day, and then it is not a monitor.
@@ -177,9 +178,14 @@ scripts/smoke.mjs  end-to-end test — boots a server, drives a session through 
 ## Testing
 
 ```bash
-npm run smoke        # 60 checks against a real server on a throwaway database
+npm run smoke        # 77 checks against a real server on a throwaway database
 npm run typecheck    # frontend and server
 ```
+
+`lane_lost` is the one with no visible symptom. Every other failure either stops the
+numbers or makes them visibly wrong; this one keeps them flowing, correctly computed,
+over a corridor left over from before the camera cut away. The index stays in range,
+the trend stays smooth, and it is describing a pit wall.
 
 The smoke test trips each watchdog on purpose — stalls a feed, strobes the
 classifier, breaches the latency budget, points verification at a dead port —

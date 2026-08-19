@@ -3,6 +3,7 @@ import { Router } from 'express';
 import type { Ctx } from '../context.ts';
 import { badRequest, body, conflict, notFound, param, route } from '../lib/http.ts';
 import { buildReport } from '../services/report.ts';
+import { renderReport } from '../services/report-html.ts';
 import { CONDITIONS, isCondition, type Condition } from '../domain/conditions.ts';
 import type { SessionRow, SessionStatus } from '../services/store.ts';
 
@@ -252,9 +253,17 @@ export function sessionRoutes(ctx: Ctx): Router {
       });
 
       const signature = b.str('sourceSignature', { optional: true, max: 300 });
+      const laneField = b.obj('lane', { optional: true });
+      const lane = laneField
+        ? {
+            state: laneField.str('state', { max: 20, enum: ['searching', 'locked', 'lost', 'manual'] }),
+            confidence: laneField.num('confidence', { min: 0, max: 1, default: 0 }),
+          }
+        : undefined;
+
       const written = ctx.store.insertReadings(s.id, rows);
       ctx.store.touchSession(s.id);
-      ctx.monitor.observeReadings(s.id, rows, signature || undefined);
+      ctx.monitor.observeReadings(s.id, rows, signature || undefined, lane);
       ctx.metrics.observeIngest(written);
       ctx.metrics.inc('pitvision_readings_ingested_total', written);
 
@@ -393,6 +402,20 @@ export function sessionRoutes(ctx: Ctx): Router {
     route((req, res) => {
       const s = must(param(req, 'id'));
       res.json(buildReport(ctx.store, s, ctx.config));
+    }),
+  );
+
+  /**
+   * The same report as a page.
+   *
+   * A debrief is people round a laptop, not a JSON viewer. This is the URL you
+   * send them; it renders offline and prints.
+   */
+  r.get(
+    '/sessions/:id/report.html',
+    route((req, res) => {
+      const s = must(param(req, 'id'));
+      res.type('html').send(renderReport(buildReport(ctx.store, s, ctx.config)));
     }),
   );
 

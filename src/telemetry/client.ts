@@ -38,6 +38,17 @@ const MAX_BATCH = 300;
 
 export type TelemetryStatus = 'off' | 'connecting' | 'live' | 'retrying';
 
+/** A finding the backend raised about the detector, not about the track. */
+export interface Incident {
+  id: number;
+  kind: string;
+  severity: 'warn' | 'critical';
+  opened_at: number;
+  closed_at: number | null;
+  summary: string;
+  detail: string | null;
+}
+
 export interface TelemetryState {
   status: TelemetryStatus;
   sessionId: string | null;
@@ -77,8 +88,31 @@ export class Telemetry {
   private flushTimer = 0;
   private flushing = false;
   private sourceSignature = '';
+  /**
+   * What the lane tracer is doing.
+   *
+   * Sent with each batch because it decides what the readings *mean*: a lost
+   * lane means the index is being measured through a corridor that no longer
+   * describes anything in the picture, and the numbers keep arriving looking
+   * exactly as confident as they did when it was locked.
+   */
+  private laneState: string = 'searching';
+  private laneConfidence = 0;
   private sent = 0;
   private consecutiveFailures = 0;
+  private stream: EventSource | null = null;
+
+  /**
+   * Called when the backend opens or closes an incident against this session.
+   *
+   * Without this the monitor was talking to itself. It watched the detector,
+   * wrote its findings to a database and published them to anyone subscribed —
+   * and the one tab that actually had a human in front of it was not
+   * subscribed. A stalled feed, a calibration measured on different footage, a
+   * vision model contradicting the detector on every frame: all correctly
+   * detected, all invisible to the person making the tyre call.
+   */
+  onIncident: ((incident: Incident, state: 'opened' | 'closed') => void) | null = null;
   private listeners = new Set<(s: TelemetryState) => void>();
   private state: TelemetryState = {
     status: 'off',
@@ -176,7 +210,44 @@ export class Telemetry {
     this.set({ status: 'live', message: `Recording — ${this.sessionId.slice(0, 12)}` });
 
     this.flushTimer = window.setInterval(() => void this.flush(), FLUSH_INTERVAL_MS);
+    this.listen(this.sessionId);
     return this.sessionId;
+  }
+
+  /**
+   * Subscribe to this session's own stream, to hear what the backend has
+   * noticed about it.
+   *
+   * Only `incident.*` is acted on. The stream also carries readings, pings and
+   * calibration events — all of which this client is the one that *sent* — and
+   * surfacing those would show every ping back to itself a second time.
+   *
+   * EventSource reconnects on its own, which is the reason for using it here: a
+   * backend restart mid-session must not leave the pit wall silently unwatched
+   * until someone reloads the page.
+   */
+  private listen(sessionId: string) {
+    this.stream?.close();
+    try {
+      const es = new EventSource(`/api/sessions/${sessionId}/stream`);
+      this.stream = es;
+
+      const handle = (state: 'opened' | 'closed') => (ev: MessageEvent) => {
+        try {
+          const msg = JSON.parse(ev.data) as { data: Incident };
+          if (msg?.data) this.onIncident?.(msg.data, state);
+        } catch {
+          /* a malformed frame is not worth taking the session down for */
+        }
+      };
+
+      es.addEventListener('incident.opened', handle('opened'));
+      es.addEventListener('incident.closed', handle('closed'));
+    } catch {
+      // No EventSource, or the stream was refused. Recording is unaffected —
+      // this only costs the live incident feed.
+      this.stream = null;
+    }
   }
 
   /**
@@ -184,6 +255,12 @@ export class Telemetry {
    * Called from the engine's reading listener, so it must be cheap and
    * synchronous: no awaits, no allocation beyond the sampled row.
    */
+  /** Called every frame by the app; cheap, no allocation. */
+  setLane(state: string, confidence: number) {
+    this.laneState = state;
+    this.laneConfidence = confidence;
+  }
+
   observe(reading: Reading, latencyMs?: number) {
     if (!this.sessionId) return;
     if (reading.t - this.lastSampleAt < SAMPLE_INTERVAL_MS) return;
@@ -269,6 +346,7 @@ export class Telemetry {
         const res = await this.post(`/api/sessions/${this.sessionId}/readings`, {
           readings: batch,
           sourceSignature: this.sourceSignature,
+          lane: { state: this.laneState, confidence: this.laneConfidence },
         });
         if (res) {
           // Only drop what the server confirmed. A failed flush leaves the queue
@@ -297,6 +375,8 @@ export class Telemetry {
 
     window.clearInterval(this.flushTimer);
     this.flushTimer = 0;
+    this.stream?.close();
+    this.stream = null;
     await this.flush();
 
     this.sessionId = null;
@@ -319,6 +399,8 @@ export class Telemetry {
    */
   endOnUnload() {
     if (!this.sessionId) return;
+    this.stream?.close();
+    this.stream = null;
     const body = JSON.stringify({ reason: 'tab closed' });
     navigator.sendBeacon?.(
       `/api/sessions/${this.sessionId}/end`,

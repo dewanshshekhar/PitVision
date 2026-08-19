@@ -23,6 +23,14 @@ export interface Calibration {
   /** EMA factor, 0..1. Lower = smoother, slower. */
   smoothing: number;
   road: RoadGeometry;
+  /**
+   * Trace the road automatically instead of measuring through `road`.
+   *
+   * On by default. The hand-placed trapezoid remains the fallback and the
+   * override: a camera the tracer cannot read still works, and an operator who
+   * has aimed the ROI deliberately can turn tracing off and keep it.
+   */
+  laneAuto: boolean;
   aiIntervalSec: number;
   aiEnabled: boolean;
   /**
@@ -68,6 +76,7 @@ export const DEFAULT_CALIBRATION: Calibration = {
   holdTicks: 6,
   smoothing: 0.16,
   road: { ...DEFAULT_ROAD },
+  laneAuto: true,
   aiIntervalSec: 10,
   aiEnabled: true,
   divergenceReliable: true,

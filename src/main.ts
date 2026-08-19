@@ -241,7 +241,13 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   lastReading = r;
   ticksThisSecond++;
   alerts.observe(r, cal);
+  const laneStatus = engine.laneStatus;
+  telemetry.setLane(
+    cal.laneAuto ? laneStatus.state : 'manual',
+    laneStatus.trace?.confidence ?? 0,
+  );
   telemetry.observe(r, r.endToEndMs);
+  syncLanePill();
   // A condition change is what a second screen is waiting for, so it goes out
   // now rather than on the next flush.
   if (previousCondition && previousCondition !== r.condition) telemetry.observeConditionChange();
@@ -335,6 +341,9 @@ function frame(t: number) {
   lastFrameAt = performance.now();
   source.pump();
 
+  // Draw the region the detector actually measured, not the one in the
+  // calibration — with tracing on, those are different shapes.
+  overlay.corridor = engine.lastCorridor;
   overlay.draw(engine.lastMetrics, cal, source.width, source.height);
   particles.draw(lastReading?.wetness ?? 0);
 
@@ -389,7 +398,10 @@ Object.assign(window, {
     get cal() { return cal; },
     /** Force a repaint of every canvas layer. */
     repaint() {
-      overlay.draw(engine.lastMetrics, cal, source.width, source.height);
+      // Draw the region the detector actually measured, not the one in the
+  // calibration — with tracing on, those are different shapes.
+  overlay.corridor = engine.lastCorridor;
+  overlay.draw(engine.lastMetrics, cal, source.width, source.height);
       particles.draw(engine.lastReading?.wetness ?? 0);
       chart.draw(engine.history, cal, CONDITION_COLOUR[engine.lastReading?.condition ?? 'Dry']);
       strip.draw(engine.history);
@@ -407,6 +419,39 @@ Object.assign(window, {
 const sessionPill = $('#pill-session');
 const sessionLabel = $('#session-label');
 
+// ── Lane trace state ───────────────────────────────────────────────────
+//
+// The corridor the detector measures through is found automatically and can
+// fail to find anything — a camera on the pit garage, a feed that has cut to a
+// studio shot. That has to be visible, because the alternative is a readout
+// that looks identical whether it is measuring tarmac or a wall.
+const lanePill = $('#pill-lane');
+const laneLabel = $('#lane-label');
+
+function syncLanePill() {
+  if (!cal.laneAuto) {
+    lanePill.className = 'pill';
+    lanePill.title = 'Automatic tracing off — measuring through the hand-placed ROI';
+    laneLabel.textContent = 'manual';
+    return;
+  }
+  const { state, trace, lastCostMs } = engine.laneStatus;
+  if (state === 'locked' && trace) {
+    lanePill.className = 'pill';
+    lanePill.title =
+      `Road traced: ${(trace.meanWidth * 100).toFixed(0)}% of frame width, ` +
+      `${(trace.confidence * 100).toFixed(0)}% of rows measured, ${lastCostMs.toFixed(2)} ms per trace`;
+    laneLabel.textContent = `traced ${(trace.confidence * 100).toFixed(0)}%`;
+  } else {
+    lanePill.className = 'pill warn-pill';
+    lanePill.title =
+      state === 'lost'
+        ? 'Lost the road — measuring through the last known region. Check the overlay.'
+        : 'Looking for the road surface.';
+    laneLabel.textContent = state === 'lost' ? 'lost' : 'searching';
+  }
+}
+
 telemetry.onChange((s) => {
   sessionPill.hidden = s.status === 'off' && !s.sessionId;
   sessionPill.className = `pill${s.status === 'retrying' ? ' warn-pill' : ''}`;
@@ -422,6 +467,26 @@ telemetry.onChange((s) => {
 });
 
 alerts.onPush = (a) => telemetry.event(a);
+
+// The backend watches the detector while it runs. What it finds has to arrive
+// where the strategist is already looking, or the watching was pointless.
+telemetry.onIncident = (incident, state) => {
+  if (state === 'closed') {
+    alerts.push({
+      kind: 'monitor',
+      level: 'info',
+      title: `Cleared — ${incident.summary}`,
+      detail: `Held for ${(((incident.closed_at ?? Date.now()) - incident.opened_at) / 1000).toFixed(0)}s.`,
+    });
+    return;
+  }
+  alerts.push({
+    kind: 'monitor',
+    level: incident.severity === 'critical' ? 'critical' : 'warn',
+    title: incident.summary,
+    detail: incident.detail ?? 'Raised by the backend monitor.',
+  });
+};
 
 /** Open a recording session for whatever feed is now loaded. */
 async function startRecording() {
@@ -541,7 +606,19 @@ async function preRace(calibrate = true) {
   engine.stop();
   source.seeking = true;
   try {
-    const result = await runPreRaceCheck(source, engine, cal, renderChecks, { calibrate });
+    const result = await runPreRaceCheck(source, engine, cal, renderChecks, {
+      calibrate,
+      // A live feed hands back usable anchors early and keeps refining them
+      // behind the session. Each refinement is applied as it arrives, so the
+      // scale tightens under a readout that never stopped.
+      onLiveRefine: (refined) => {
+        cal = refined;
+        engine.setCalibration(cal);
+        saveCalibration(cal);
+        calPanel.syncAll();
+        syncCalibrationBanner();
+      },
+    });
     if (result.calibration) {
       cal = result.calibration;
       engine.setCalibration(cal);

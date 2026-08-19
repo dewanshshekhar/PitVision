@@ -46,6 +46,8 @@ export interface MonitorThresholds {
   instabilityWindowMs: number;
   /** Sustained wetness trend (index points/min) that counts as a real weather event. */
   surgePerMin: number;
+  /** How long the lane tracer may be lost before the readings stop being trustworthy. */
+  laneLostMs: number;
 }
 
 export interface Config {
@@ -109,6 +111,7 @@ export function loadConfig(): Config {
       instabilityFlips: num('PITVISION_INSTABILITY_FLIPS', 6, { min: 2 }),
       instabilityWindowMs: num('PITVISION_INSTABILITY_WINDOW_MS', 30_000, { min: 1000 }),
       surgePerMin: num('PITVISION_SURGE_PER_MIN', 14, { min: 1 }),
+      laneLostMs: num('PITVISION_LANE_LOST_MS', 5000, { min: 500 }),
     },
     pricing: {
       inputPerMTok: num('PITVISION_PRICE_INPUT_PER_MTOK', 5, { min: 0 }),

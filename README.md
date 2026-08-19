@@ -90,10 +90,12 @@ before the session starts.
 signal is computed at this resolution; nothing needs full resolution to answer "is that
 tarmac wet".
 
-**2 — Region of interest.** The road is modelled as a perspective trapezoid, subdivided
-into a centre band (the racing line) and two outer bands (the track edges). Kerbs, white
-lines and run-off are deliberately excluded — painted kerbing is bright and desaturated,
-which reads as reflection and manufactures a false dry line.
+**2 — Region of interest — the road is traced, not assumed.** The lane is found
+automatically every quarter second and followed. Only that surface is measured; it is
+subdivided into a centre band (the racing line) and two outer bands (the track edges).
+Kerbs, white lines and run-off are deliberately excluded — painted kerbing is bright and
+desaturated, which reads as reflection and manufactures a false dry line. See
+**[Lane tracing](#lane-tracing)** below.
 
 **3 — Four signals**, per band, in a single pixel sweep:
 
@@ -232,6 +234,103 @@ barriers, kerbs or grass inside the trapezoid will poison every signal, and no a
 threshold tuning recovers from it — painted kerbing in particular reads as reflection and
 fabricates a dry line that isn't there.
 
+## Lane tracing
+
+The detector cannot say anything about the road until it knows which pixels *are* road.
+That used to be a fixed perspective trapezoid, placed by hand or by a grid search over
+candidate boxes. Both produce the same shape: straight sides, which cannot follow a corner.
+On a bend that necessarily includes whatever is on the outside of it — grass, gravel, a
+barrier — while missing tarmac on the inside.
+
+That matters more here than in a lane-keeping system, because this pipeline does not just
+locate the road, it **measures** it. Grass inside the region drags saturation up and texture
+down; a kerb reads as standing water. A region that is 90% correct produces a confident
+wetness index that is wrong, which is worse than no index at all.
+
+So the road is traced:
+
+1. **Seed** — candidate patches are scored on what tarmac actually is: grey, mid-bright, and
+   uniform across its width. That last test is what separates road from bodywork (uniform
+   but coloured) and from grass (coloured and much noisier).
+2. **Grow** — from the seed, row by row, taking the contiguous run of pixels that match the
+   surface. Each row's search starts from the row below it, so the corridor **follows the
+   road as it bends**. Nothing about the shape is assumed.
+3. **Fit** — a quadratic through each boundary. Stiff enough that one occluded row or one
+   kerb cannot bend the corridor, flexible enough to describe an arc.
+4. **Track** — successive traces are blended, so the corridor tracks rather than twitches.
+   A corridor that moved every frame would make the racing-line band a different strip of
+   tarmac each time, and the divergence signal is a comparison between two strips that are
+   supposed to stay put.
+
+### What it refuses to do
+
+A break in the run is classified before it is tolerated, which is a physical distinction
+rather than a tuned one:
+
+| The pixel fails on | Reading | Tolerated across |
+|---|---|---|
+| Luma, but is still near-colourless | Paint, shadow, a wet patch — still road | ~3% of frame width |
+| Saturation | A different material: grass, kerb, bodywork, gravel | 2 px |
+
+One gap budget for both is what let a five-pixel white line split the corridor while an
+eleven-pixel kerb was the thing the budget had been sized against.
+
+The corridor is also reported **only across rows that were actually measured**. The fit is
+defined over the whole search region and evaluating it there would hand back a confident
+corridor covering rows where no road was ever seen — on an onboard camera, straight over the
+car's own nose. Filling an interior gap is the fit doing its job; extending past both ends of
+the evidence is inventing road.
+
+And when nothing road-like is found, it returns nothing. A camera pointed at the pit garage
+produces "no road", not a corridor across the wall. If the trace is lost for more than a few
+seconds the backend raises an incident, because that failure has no visible symptom: the
+readings keep arriving, correctly computed, over a region that is no longer the track.
+
+### Cost
+
+| Resolution | Median | p95 |
+|---|---|---|
+| 384×216 (analysis resolution) | 0.42 ms | 0.63 ms |
+| 640×360 | 0.95 ms | 1.17 ms |
+| 960×540 | 2.01 ms | 2.21 ms |
+
+Re-traced four times a second rather than every frame — a road does not move between two
+frames 40 ms apart — which comes to **0.064 ms per frame amortised** at 25 fps against a
+100 ms budget. The wetness readout still updates every frame; only the shape it is measured
+through holds still between traces.
+
+`npm run test:lane` runs the tracer headlessly against synthetic roads with known geometry:
+that it follows a curve rather than fitting a box, that it refuses when there is no road,
+and that kerbs, markings and bodywork do not pull it off the tarmac.
+
+**Manual override** is still there. Turn tracing off in **Calibration & ROI** and aim the
+trapezoid by hand — the right answer for a camera the tracer cannot read.
+
+---
+
+## Live feeds start immediately
+
+A clip can be scanned end to end because the whole of it is available now. A live feed
+cannot — there is no "end" yet — so it is watched instead.
+
+That watch used to block for twenty seconds and return nothing until it finished, which on
+a live feed means twenty seconds of a race happening behind a blank readout. The reason
+someone pointed a camera at the track was to be told what it is doing *now*.
+
+It now publishes anchors as soon as they are worth anything and refines them in place:
+
+| Stage | When | What the readout means |
+|---|---|---|
+| `warming` | first frames | Waiting for road; nothing shown yet |
+| `provisional` | ~1 s | Live, but the scale is still being established — expect the index to shift |
+| `settling` | ~3 s | Usable; treat a borderline call as borderline |
+| `settled` | ~15 s | Full confidence |
+
+The stage is reported rather than hidden. A reading from second two is genuinely less certain
+than one from second twenty, and saying so is what makes starting early honest rather than
+merely faster. Buffers for both the analysis pass and the tracer are allocated before any of
+this, so the first analysed frame costs the same as the thousandth.
+
 ## Camera angle decides what's measurable
 
 Wetness needs one patch of road. **Drying needs to see across the track's width**, and not
@@ -340,7 +439,7 @@ almost always means the calibration anchors no longer match the footage.
 
 ```
 src/
-  cv/            the detector — rois, metrics, calibration, classify, engine
+  cv/            the detector — lane tracing, rois, metrics, calibration, classify, engine
   strategy/      rule-based tyre call
   ai/            verification client
   telemetry/     ships the session to the backend; fire-and-forget, off the hot path
@@ -348,7 +447,9 @@ src/
   ui/            overlay, trend chart, condition strip, particles, calibration panel
   styles/        design tokens + application styling
 server/          the backend — recording, monitoring, reporting  (docs/BACKEND.md)
-scripts/smoke.mjs  end-to-end API test
+scripts/
+  smoke.mjs      end-to-end API test
+  lane-test.mjs  lane tracer, headless, against synthetic roads
 ```
 
 `window.pitvision` exposes the engine, source and calibration in the console for

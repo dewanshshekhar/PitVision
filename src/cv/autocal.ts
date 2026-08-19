@@ -367,6 +367,110 @@ export async function autoCalibrateLive(
   return anchorsFrom(samples);
 }
 
+/**
+ * Minimum samples before anchors mean anything at all.
+ *
+ * Four frames spread over a second. Below that a single passing shadow is the
+ * entire dataset and the anchors it produces are noise.
+ */
+const PROVISIONAL_MIN = 4;
+
+/** Samples at which the anchors stop moving materially — a full watch. */
+const SETTLED_AT = 60;
+
+export type LiveCalStage = 'warming' | 'provisional' | 'settling' | 'settled';
+
+export interface LiveCalUpdate {
+  stage: LiveCalStage;
+  report: AutoCalReport;
+  samples: number;
+  /** 0..1 — how much of the full watch has been completed. */
+  progress: number;
+  note: string;
+}
+
+/**
+ * Progressive calibration for a live feed.
+ *
+ * The blocking version watched for twenty seconds and returned nothing until it
+ * was finished. On a clip that is a reasonable trade, because the clip is not
+ * going anywhere. On a live feed it is the wrong trade entirely: those twenty
+ * seconds are twenty seconds of a race happening with a blank readout, and the
+ * reason someone pointed a camera at the track was to be told what it is doing
+ * *now*.
+ *
+ * So the anchors are published as soon as they are worth anything and refined
+ * in place afterwards. A reading from second two is genuinely less certain than
+ * one from second twenty, and the stage says which it is rather than presenting
+ * both with the same confidence — that distinction is the honest part, and it
+ * is what makes publishing early defensible instead of just faster.
+ *
+ * Nothing here blocks the engine: it samples what the live pipeline is already
+ * producing.
+ */
+export async function autoCalibrateLiveProgressive(
+  engine: CvEngine,
+  onUpdate: (u: LiveCalUpdate) => void,
+  opts: { seconds?: number; signal?: { aborted: boolean } } = {},
+): Promise<AutoCalReport | null> {
+  const seconds = opts.seconds ?? 20;
+  const total = seconds * 4;
+  const samples: Signals[] = [];
+
+  let published: AutoCalReport | null = null;
+  let lastPublishAt = 0;
+
+  for (let i = 0; i < total; i++) {
+    if (opts.signal?.aborted) break;
+
+    const m = engine.probe();
+    if (m && m.road.pixels > 0) samples.push(toSignals(m.road));
+
+    const n = samples.length;
+    const progress = Math.min(1, n / SETTLED_AT);
+
+    // Republish on a schedule rather than every sample: recomputing anchors
+    // 80 times over the watch is wasted work, and an index that shifts under
+    // the reader every 250 ms is unreadable even when each shift is correct.
+    const due = n >= PROVISIONAL_MIN && (published === null || n - lastPublishAt >= 8);
+
+    if (due) {
+      published = anchorsFrom(samples);
+      lastPublishAt = n;
+
+      const stage: LiveCalStage =
+        n >= SETTLED_AT ? 'settled' : n >= PROVISIONAL_MIN * 3 ? 'settling' : 'provisional';
+
+      onUpdate({
+        stage,
+        report: published,
+        samples: n,
+        progress,
+        note:
+          stage === 'settled'
+            ? published.note
+            : stage === 'settling'
+              ? `Anchors settling — ${n} frames watched, still refining. Readings are usable; ` +
+                `treat a borderline call as borderline.`
+              : `Provisional anchors from ${n} frames. The readout is live, but the scale is ` +
+                `still being established — expect the index to shift as the watch completes.`,
+      });
+    } else if (n < PROVISIONAL_MIN) {
+      onUpdate({
+        stage: 'warming',
+        report: published ?? ({} as AutoCalReport),
+        samples: n,
+        progress,
+        note: 'Warming up — waiting for the first frames of road.',
+      });
+    }
+
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  return published;
+}
+
 export function applyReport(cal: Calibration, report: AutoCalReport): Calibration {
   return { ...cal, dry: { ...report.dry }, wet: { ...report.wet } };
 }

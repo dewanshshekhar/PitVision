@@ -3,6 +3,8 @@ import { slope } from '../util/math';
 import { normaliseSignals, wetnessIndex, type Calibration } from './calibration';
 import { ConditionClassifier } from './classify';
 import { analyseFrame, toSignals } from './metrics';
+import { LaneTracker, type LaneStatus } from './lane';
+import { corridorFromRoad, corridorFromTrace, type Corridor } from './rois';
 
 /** Anything that can be drawn into a canvas: a <video> or the synthetic scene. */
 export interface FrameSource {
@@ -59,6 +61,18 @@ export class CvEngine {
   /** Called immediately before each analysis pass — used to advance a generated feed. */
   beforeTick: (() => void) | null = null;
 
+  /**
+   * Finds the road and follows it.
+   *
+   * Rate-limited internally, so this costs a fraction of a millisecond per
+   * frame amortised — the corridor is re-derived four times a second and reused
+   * in between, because a road does not move between two frames 40 ms apart.
+   */
+  readonly lane = new LaneTracker();
+
+  /** The corridor the last pass actually measured through. */
+  lastCorridor: Corridor | null = null;
+
   private ema: { road?: number; line?: number; edge?: number } = {};
   private classifier: ConditionClassifier;
 
@@ -97,11 +111,23 @@ export class CvEngine {
   setSource(s: FrameSource) {
     this.source = s;
     this.resetSmoothing();
+    // The previous corridor described a different road. Carrying it over would
+    // measure the new feed through the old feed's geometry.
+    this.lane.reset();
   }
 
   setCalibration(c: Calibration) {
+    const wasAuto = this.cal?.laneAuto;
     this.cal = c;
     this.classifier.setCalibration(c);
+    // Re-trace immediately when automatic tracing is switched back on, rather
+    // than leaving the readout on the manual ROI until the next interval.
+    if (c.laneAuto && !wasAuto) this.lane.invalidate();
+  }
+
+  /** Where the lane tracer currently thinks the road is. */
+  get laneStatus(): LaneStatus {
+    return this.lane.status;
   }
 
   onReading(fn: (r: Reading, m: FrameMetrics) => void) {
@@ -249,7 +275,18 @@ export class CvEngine {
       return null; // frame not decodable yet
     }
     const img = this.ctx.getImageData(0, 0, this.sampleW, this.sampleH);
-    const metrics = analyseFrame(img, this.cal.road, { v: this.cal.glareV, s: this.cal.glareS });
+
+    // Trace first, then measure through whatever the trace found.
+    //
+    // Falling back to the hand-placed trapezoid rather than refusing: the
+    // manual ROI is still the answer for a camera the tracer cannot read, and
+    // an operator who has aimed it deliberately should not have it overridden
+    // by a trace that is guessing.
+    const trace = this.cal.laneAuto ? this.lane.update(img) : null;
+    const corridor = trace ? corridorFromTrace(trace) : corridorFromRoad(this.cal.road);
+    this.lastCorridor = corridor;
+
+    const metrics = analyseFrame(img, corridor, { v: this.cal.glareV, s: this.cal.glareS });
     metrics.ms = performance.now() - t0;
     return metrics;
   }
