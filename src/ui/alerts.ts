@@ -52,6 +52,13 @@ export class AlertFeed {
 
   soundOn = false;
 
+  /**
+   * Called for every ping. Lets the pings be recorded server-side without the
+   * feed itself knowing anything about a backend — this class stays a UI
+   * component that happens to be observable.
+   */
+  onPush: ((a: Alert) => void) | null = null;
+
   constructor(list: HTMLElement, counter: HTMLElement) {
     this.list = list;
     this.counter = counter;
@@ -64,6 +71,7 @@ export class AlertFeed {
     if (this.alerts.length > MAX_ALERTS) this.alerts.pop();
     this.render();
     if (this.soundOn && a.level !== 'info') this.beep(a.level === 'critical' ? 880 : 620);
+    this.onPush?.(alert);
   }
 
   clear() {

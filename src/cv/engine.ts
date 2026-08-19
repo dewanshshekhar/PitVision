@@ -331,6 +331,7 @@ export class CvEngine {
       signals: roadSignals,
       normalised: normaliseSignals(roadSignals, this.cal),
       ms: metrics.ms,
+      ...(countLatency ? { endToEndMs: endToEnd } : {}),
     };
 
     this.lastReading = reading;

@@ -38,8 +38,13 @@ Without a key the CV engine runs exactly as normal and the verification card rea
 Single-process deployment:
 
 ```bash
-npm run build && npm start      # serves the built app + the proxy on :8787
+npm run build && npm start      # serves the built app + the backend on :8787
 ```
+
+The backend records the session as it runs, watches the detector while it does,
+and produces a report at the end — see **[docs/BACKEND.md](docs/BACKEND.md)**. It
+needs no setup: the database is a file it creates on first boot. If it is not
+running, the detector behaves exactly as it did before and nothing is recorded.
 
 ---
 
@@ -299,14 +304,35 @@ The browser posts a downscaled JPEG plus the current CV reading to `POST /api/ve
 The server calls the Anthropic Messages API with the image and a schema-constrained
 response format, so the client parses a typed object rather than prose.
 
-- **The API key stays server-side.** That is the reason the proxy exists.
+- **The API key stays server-side.** That is the reason the request goes through the
+  backend rather than straight out of the browser.
 - The model is told what the CV engine concluded, and explicitly instructed to report what
   it actually sees rather than agree.
 - Disagreement is surfaced, not hidden — the card reads *flags for review* and shows both
   calls.
-- Latency is managed deliberately: thinking off, low effort, one image.
+- Latency is managed deliberately: low effort, one image.
+- **Every attempt is recorded**, including the failures. An agreement rate computed only
+  over the calls that succeeded is a survivorship-biased number, and the failures are what
+  distinguish a session where the detector was checked from one where nothing was watching.
 
 Model defaults to `claude-opus-5`; override with `PITVISION_MODEL`.
+
+### Agreement is graded, not a yes/no
+
+The model used to be offered `Dry | Damp | Wet | Drying | Unknown` while the engine
+classifies into seven states. Every frame the engine called **Sunny**, **Greasy** or
+**Flooded** was therefore recorded as a disagreement *by construction* — the model had no
+way to spell the word it was being compared against, so the card read *flags for review*
+on frames where both sides had seen the same thing. The enum is now the full set.
+
+The verdict is also no longer a boolean. `Damp` against `Wet` is two people looking at the
+same tarmac splitting a judgement call; `Dry` against `Flooded` is a broken detector.
+Scoring them the same way buried the one that mattered, so a neighbouring band counts as
+half agreement and only a real conflict counts as none.
+
+Sustained disagreement across a session is the signal worth acting on, and it is now
+watched for: the backend raises an incident when the two sides stop agreeing, because that
+almost always means the calibration anchors no longer match the footage.
 
 ---
 
@@ -317,10 +343,12 @@ src/
   cv/            the detector — rois, metrics, calibration, classify, engine
   strategy/      rule-based tyre call
   ai/            verification client
+  telemetry/     ships the session to the backend; fire-and-forget, off the hot path
   source/        feed management + the synthetic scene generator
   ui/            overlay, trend chart, condition strip, particles, calibration panel
   styles/        design tokens + application styling
-server/proxy.mjs the verification proxy (holds the API key)
+server/          the backend — recording, monitoring, reporting  (docs/BACKEND.md)
+scripts/smoke.mjs  end-to-end API test
 ```
 
 `window.pitvision` exposes the engine, source and calibration in the console for

@@ -16,6 +16,7 @@ import { ParticleField } from './ui/particles';
 import { buildCalibrationPanel } from './ui/panels';
 import { estimateLap, formatLap, formatDelta } from './strategy/lapdelta';
 import { loadEntrant, saveEntrant, renderEntrant, type Entrant } from './ui/entrant';
+import { Telemetry } from './telemetry/client';
 import { $, el, toast } from './util/dom';
 
 // ── State ──────────────────────────────────────────────────────────────
@@ -26,6 +27,9 @@ const source = new SourceManager();
 // without frame callbacks stays around 60 ms rather than 95 ms.
 const engine = new CvEngine(source, cal, { sampleWidth: 384, hz: 20 });
 const verifier = new Verifier();
+// Recording is additive: if the backend is unreachable every call here is a
+// no-op and the detector runs exactly as it did before.
+const telemetry = new Telemetry();
 
 const stage = $('#stage');
 const overlay = new Overlay($<HTMLCanvasElement>('#overlay'));
@@ -233,9 +237,14 @@ let ticksThisSecond = 0;
 let rateWindow = performance.now();
 
 function applyReading(r: Reading, _m: FrameMetrics) {
+  const previousCondition = lastReading?.condition;
   lastReading = r;
   ticksThisSecond++;
   alerts.observe(r, cal);
+  telemetry.observe(r, r.endToEndMs);
+  // A condition change is what a second screen is waiting for, so it goes out
+  // now rather than on the next flush.
+  if (previousCondition && previousCondition !== r.condition) telemetry.observeConditionChange();
 
   const lap = estimateLap(baselineLap, r.condition);
   $('#lap-projected').textContent = formatLap(lap.seconds);
@@ -388,6 +397,50 @@ Object.assign(window, {
   },
 });
 
+// ── Session recording ──────────────────────────────────────────────────
+//
+// The session is scoped to one feed. Loading a different clip closes the
+// previous session rather than continuing it: the calibration anchors change
+// with the footage, and a series scored against two sets of anchors is not one
+// series.
+
+const sessionPill = $('#pill-session');
+const sessionLabel = $('#session-label');
+
+telemetry.onChange((s) => {
+  sessionPill.hidden = s.status === 'off' && !s.sessionId;
+  sessionPill.className = `pill${s.status === 'retrying' ? ' warn-pill' : ''}`;
+  sessionPill.title = s.message;
+  sessionLabel.textContent =
+    s.status === 'live'
+      ? `rec ${s.sent}`
+      : s.status === 'retrying'
+        ? `queued ${s.queued}`
+        : s.status === 'connecting'
+          ? 'opening…'
+          : 'off';
+});
+
+alerts.onPush = (a) => telemetry.event(a);
+
+/** Open a recording session for whatever feed is now loaded. */
+async function startRecording() {
+  if (source.kind === 'none') return;
+  const id = await telemetry.start({
+    kind: source.kind,
+    label: source.label,
+    signature: source.signature,
+    entrant,
+    baselineLapS: baselineLap,
+  });
+  verifier.sessionId = id;
+  if (id) toast(`Recording session ${id.slice(0, 12)}`);
+}
+
+// The tab going away must close the session, or its report would carry the
+// server's whole idle timeout as silence on the end.
+window.addEventListener('pagehide', () => telemetry.endOnUnload());
+
 // ── AI verification ────────────────────────────────────────────────────
 const verifyUi = {
   status: $('#verify-status'),
@@ -503,6 +556,17 @@ async function preRace(calibrate = true) {
         : 'pass';
     verdict.className = `tag ${worst}`;
     verdict.textContent = worst === 'pass' ? 'ready' : worst === 'warn' ? 'ready, with notes' : 'not ready';
+    // Store the anchors alongside the outcome. A disputed reading is almost
+    // always a disputed calibration, and without them a recorded wetness of 62
+    // is a number with no units.
+    void telemetry.calibration({
+      ok: worst !== 'fail',
+      checks: result.checks,
+      verdict: worst,
+      anchoring: result.report?.branch ?? null,
+      cal,
+      signature: source.signature,
+    });
     alerts.push({
       kind: 'system',
       level: worst === 'fail' ? 'critical' : 'info',
@@ -544,6 +608,7 @@ function useGeneratedScene(view: 'onboard' | 'trackside' = 'onboard') {
   engine.clearHistory();
   alerts.clear();
   syncPlayButton();
+  void startRecording();
   $('#btn-synthetic').setAttribute('aria-pressed', String(view === 'onboard'));
   $('#btn-trackside').setAttribute('aria-pressed', String(view === 'trackside'));
   toast(
@@ -566,6 +631,9 @@ async function adoptFootage(load: () => Promise<void>, name: string) {
     alerts.clear();
     syncPlayButton();
     toast(`${name} loaded — running pre-race check`);
+    // Before the check, so its outcome and anchors land in this session
+    // rather than in whatever was open beforehand.
+    await startRecording();
     await preRace(true);
   } catch (err) {
     toast(err instanceof Error ? err.message : String(err));

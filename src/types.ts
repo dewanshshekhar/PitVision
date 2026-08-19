@@ -87,13 +87,33 @@ export interface Reading {
   /** Normalised 0..1 signals after calibration — what actually feeds the index */
   normalised: Signals;
   ms: number;
+  /**
+   * Frame presented → this reading committed, milliseconds.
+   *
+   * Absent on a watchdog tick, which re-reads a still frame that has been
+   * sitting there and therefore says nothing about how fast the pipeline turns
+   * a frame around. Recording it per reading — rather than sampling the rolling
+   * average — is what lets a session report quote a real p95 instead of a p95
+   * of averages, which flatters the tail.
+   */
+  endToEndMs?: number;
 }
+
+/**
+ * How far apart the two calls are.
+ *
+ * A boolean was not enough. `Damp` against `Wet` is two people looking at the
+ * same tarmac and splitting a judgement call; `Dry` against `Flooded` is a
+ * broken detector. Scoring them the same way buried the one that mattered.
+ */
+export type AgreementLevel = 'match' | 'adjacent' | 'conflict' | 'unknown';
 
 export interface Verification {
   condition: Condition | 'Unknown';
   confidence: number;
   reasoning: string;
   agrees: boolean;
+  agreement?: AgreementLevel | null;
   cvCondition: Condition;
   at: number;
   model?: string;
