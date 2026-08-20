@@ -276,12 +276,19 @@ function scanRow(
   /**
    * Width of the previous row, in pixels, or 0 at the seed.
    *
-   * Only consulted when the brightness anchor has been given up (see below).
    * Perspective changes the road's width smoothly and slowly between adjacent
    * sampled rows; a scene opening out into sky does not.
    */
   prevWidth: number,
-): { l: number; r: number; sumL: number; sumS: number; n: number } | null {
+  /**
+   * Which way this row is from the one before it: -1 toward the horizon,
+   * +1 toward the camera.
+   *
+   * The two directions are not symmetric and treating them as if they were is
+   * what let the corridor run away — see the width clamp at the end.
+   */
+  direction: number,
+): { l: number; r: number; sumL: number; sumS: number; n: number; variance: number } | null {
   let cx = seedX;
   let reference = seedReference;
   const luma = lumaBuf!;
@@ -295,6 +302,7 @@ function scanRow(
   const materialGap = 2;
 
   let sumL = 0;
+  let sumL2 = 0;
   let sumS = 0;
   let n = 0;
 
@@ -381,7 +389,9 @@ function scanRow(
         edge = x;
         paint = 0;
         material = 0;
-        sumL += luma[row + x];
+        const v = luma[row + x];
+        sumL += v;
+        sumL2 += v * v;
         sumS += sat[row + x];
         n++;
       } else if (t === 1) {
@@ -393,11 +403,59 @@ function scanRow(
     return edge;
   };
 
-  const l = walk(cx, -1, 1);
-  const r = walk(cx + 1, 1, w - 2);
+  let l = walk(cx, -1, 1);
+  let r = walk(cx + 1, 1, w - 2);
 
-  if (r - l < 3) return null;
-  return { l, r, sumL, sumS, n };
+  // Perspective is monotonic, and that is the invariant that keeps the trace
+  // on the road.
+  //
+  // A road under a fixed camera cannot get *wider* as it recedes. Nothing in
+  // the pixel tests knows that, and in heavy rain they stop being able to tell
+  // road from anything else: measured on this project's own rain scene, the
+  // horizon row reads luma 80–122 at saturation 0.15–0.18, while the wet tarmac
+  // it is being compared against reads luma 69. The darkened sky is grey and
+  // mid-dark, which is the definition of asphalt as far as `test()` is
+  // concerned — 99% of that row passes both checks. The scan walked up to the
+  // horizon and spread across the entire frame, reporting a corridor 0.998 of
+  // the frame wide at the top and 0.300 at the bottom: a road narrower at the
+  // camera than at the horizon, which is impossible.
+  //
+  // Brightness continuity cannot catch it either, because under uniform rain
+  // the sky and the road *are* the same brightness. Geometry can. Walking
+  // toward the horizon a row may not meaningfully exceed the row below it;
+  // walking toward the camera it may widen, because that is the direction
+  // perspective actually widens in.
+  // Perspective is monotonic, and that is what keeps the trace out of the sky.
+  //
+  // A road under a fixed camera cannot get dramatically *wider* as it recedes.
+  // Nothing in the two pixel tests knows that, and under heavy rain they stop
+  // being able to tell road from sky at all: measured on this project's own
+  // rain scene, the horizon row reads luma 80–122 at saturation 0.15–0.18 while
+  // the wet tarmac it is compared against reads luma 69. A rain-darkened sky is
+  // grey and mid-dark, which is the definition of asphalt as far as `test()` is
+  // concerned — 99% of that row passed both checks. The scan walked up into it
+  // and spread across the whole frame, reporting a corridor 0.998 of the frame
+  // wide at the horizon and 0.300 at the camera: a road narrower where it is
+  // nearest, which cannot happen.
+  //
+  // Brightness continuity cannot catch it, because under uniform rain the sky
+  // and the road are the same brightness. Texture cannot be used either: it
+  // separates them cleanly, but it also rejects standing water and sun glint,
+  // which are smooth by nature and are exactly what this pipeline exists to
+  // measure.
+  //
+  // Geometry is left, and it is enough. A row that balloons past what
+  // perspective allows is *rejected* rather than trimmed to fit — trimming
+  // invents a plausible corridor out of pixels that are not road, while
+  // rejecting stops the trace where the evidence stops, which is the answer
+  // this project prefers everywhere else.
+  if (prevWidth > 0 && r - l > prevWidth * (direction < 0 ? 1.35 : 2.0)) {
+    return null;
+  }
+
+  if (r - l < 3 || n < 3) return null;
+  const mean = sumL / n;
+  return { l, r, sumL, sumS, n, variance: Math.max(0, sumL2 / n - mean * mean) };
 }
 
 /**
@@ -490,7 +548,8 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
     let prevWidth = 0;
 
     for (let i = from; step > 0 ? i <= to : i >= to; i += step) {
-      const hit = scanRow(rowY[i], cx, reference, w, opts, prevWidth);
+      const hit = scanRow(rowY[i], cx, reference, w, opts, prevWidth, step);
+
       if (!hit) {
         // Several consecutive failures mean the surface has genuinely ended —
         // the horizon above, the car's bodywork below. Keep going a little in

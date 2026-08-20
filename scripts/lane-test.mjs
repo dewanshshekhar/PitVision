@@ -334,5 +334,78 @@ section('A sheet of standing water does not truncate the trace');
     skyTrace ? `yTop ${skyTrace.yTop.toFixed(3)}` : 'no trace');
 }
 
+// ── Heavy rain: the sky stops being distinguishable ────────────────────
+section('A rain-darkened sky cannot be walked into');
+{
+  // This is the case that broke it, taken from the project's own rain scene:
+  // the horizon read luma 80-122 at saturation 0.15-0.18 while the wet tarmac
+  // below read luma 69. By colour and brightness alone, 99% of that horizon row
+  // *is* asphalt — the two tests the row scan applies cannot separate them.
+  // The scan walked up into the sky and spread across the whole frame,
+  // returning a corridor 0.998 of the frame wide at the top and 0.300 at the
+  // bottom: a road narrower where it is nearest, which cannot happen.
+  const leftAt = (t) => 0.5 - (0.07 + 0.28 * t);
+  const rightAt = (t) => 0.5 + (0.07 + 0.28 * t);
+
+  const data = new Uint8ClampedArray(W * H * 4);
+  const put = (x, y, v) => {
+    const i = (y * W + x) * 4;
+    data[i] = v; data[i + 1] = v; data[i + 2] = v * 1.02; data[i + 3] = 255;
+  };
+
+  for (let y = 0; y < H; y++) {
+    const ny = y / H;
+    for (let x = 0; x < W; x++) {
+      const nx = x / W;
+      if (ny < 0.36) {
+        // Rain-darkened sky: grey, near-colourless, mid-dark. Deliberately
+        // overlapping the wet road's brightness — that is the whole point.
+        put(x, y, 90 + (rnd() - 0.5) * 8);
+        continue;
+      }
+      const t = (ny - 0.36) / 0.64;
+      if (nx >= leftAt(t) && nx <= rightAt(t)) {
+        put(x, y, 74 + (rnd() - 0.5) * 10);
+      } else {
+        const n = (rnd() - 0.5) * 26;
+        const i = (y * W + x) * 4;
+        data[i] = 40 + n; data[i + 1] = 74 + n; data[i + 2] = 34 + n; data[i + 3] = 255;
+      }
+    }
+  }
+
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+
+  // Refusing is an acceptable answer here and so is a correct short corridor.
+  // What is not acceptable is a confident corridor covering the sky.
+  if (trace === null) {
+    check('it refuses rather than tracing the sky', true);
+  } else {
+    check('no part of the corridor is above the horizon', trace.yTop >= 0.34,
+      `yTop ${trace.yTop.toFixed(3)}`);
+    check('the corridor is not the whole frame', trace.meanWidth < 0.75,
+      `meanWidth ${trace.meanWidth.toFixed(3)}`);
+
+    const nearW = trace.right[ROWS - 3] - trace.left[ROWS - 3];
+    const farW = trace.right[2] - trace.left[2];
+    check('it is not inverted — the road is wider at the camera', nearW >= farW * 0.9,
+      `near ${nearW.toFixed(3)} vs far ${farW.toFixed(3)}`);
+  }
+
+  // The same scene with a *bright* sky must still be handled, since that was
+  // the earlier failure and the fix for one must not undo the fix for the other.
+  const bright = new Uint8ClampedArray(data);
+  for (let y = 0; y < Math.floor(0.36 * H); y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      bright[i] = 252; bright[i + 1] = 252; bright[i + 2] = 252;
+    }
+  }
+  const brightTrace = traceLane({ width: W, height: H, data: bright }, DEFAULT_TRACE_OPTIONS);
+  check('a blown-out sky is still kept out',
+    brightTrace === null || brightTrace.yTop >= 0.34,
+    brightTrace ? `yTop ${brightTrace.yTop.toFixed(3)}` : 'refused');
+}
+
 console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m\n`);
 process.exit(failed === 0 ? 0 : 1);
