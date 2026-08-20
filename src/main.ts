@@ -232,6 +232,29 @@ const ui = {
   trendRate: $('#trend-rate'),
 };
 
+/**
+ * Short code for the tyre badge.
+ *
+ * A map rather than a ternary chain, because the chain silently blanked every
+ * string it did not name — and the one it missed was `Slick (marginal)`, which
+ * is the *greasy* call: the single condition where the compound choice is
+ * genuinely close and a strategist most needs to be told "slicks, but only
+ * just". The badge went empty on exactly the frames that mattered.
+ *
+ * `SLK*` rather than `SLK` for that case, so a marginal call cannot be read at
+ * a glance as a settled one. Anything unmapped falls back to the first three
+ * letters, which is wrong-looking rather than invisible — a missing badge reads
+ * as "no data", and being loud about an unmapped string is how it gets fixed.
+ */
+const TYRE_CODE: Record<string, string> = {
+  'Slicks': 'SLK',
+  'Slick': 'SLK',
+  'Slick (marginal)': 'SLK*',
+  'Intermediate': 'INT',
+  'Full wet': 'WET',
+  '—': '—',
+};
+
 let lastReading: Reading | null = null;
 let ticksThisSecond = 0;
 let rateWindow = performance.now();
@@ -324,7 +347,7 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   }
 
   const s = suggest(r);
-  ui.tyre.textContent = s.tyre === 'Intermediate' ? 'INT' : s.tyre === 'Full wet' ? 'WET' : s.tyre === 'Slicks' ? 'SLK' : '—';
+  ui.tyre.textContent = TYRE_CODE[s.tyre] ?? s.tyre.slice(0, 3).toUpperCase();
   ui.call.textContent = s.call;
   ui.detail.textContent = s.detail;
   ui.urgency.textContent = s.urgency;
