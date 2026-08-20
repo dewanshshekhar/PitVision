@@ -171,6 +171,11 @@ export async function runPreRaceCheck(
   //     confirm it locked on before the session starts, not to place a shape.
   //     With tracing off, the old grid search still positions the hand-placed
   //     trapezoid — otherwise onboard footage silently gets measured on the car.
+  // Ask once whether a segmentation sidecar is installed. Whether a model is
+  // present is a property of the deployment, not something that changes mid
+  // session, so this belongs here and not on a timer.
+  if (cal.laneAuto) await engine.segmenter.probe();
+
   set('roi', 'running', cal.laneAuto ? 'tracing the road…' : 'locating tarmac…');
   let probe = engine.probe();
   const looksLikeRoad = (m: FrameMetricsLike | null) =>
@@ -224,8 +229,11 @@ export async function runPreRaceCheck(
   const linePx = probe.line.pixels;
   const edges = probe.left.pixels + probe.right.pixels;
 
+  const seg = engine.segmenter.state;
   const lane = engine.lane.trace;
-  const where = traced && lane
+  const where = seg.state === 'live'
+    ? `road segmented by model · limits from ${seg.limitsFrom ?? 'mask edge'} · `
+    : traced && lane
     ? `road traced · ${(lane.meanWidth * 100).toFixed(0)}% of frame width · ` +
       `${(lane.confidence * 100).toFixed(0)}% of rows measured · `
     : moved

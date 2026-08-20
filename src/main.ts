@@ -435,6 +435,14 @@ function syncLanePill() {
     laneLabel.textContent = 'manual';
     return;
   }
+  const seg = engine.segmenter.state;
+  if (engine.lastCorridorSource === 'segmentation' && seg.state === 'live') {
+    lanePill.className = 'pill';
+    lanePill.title = `${seg.message} · ${seg.latencyMs} ms round trip`;
+    laneLabel.textContent = 'segmented';
+    return;
+  }
+
   const { state, trace, lastCostMs } = engine.laneStatus;
   if (state === 'locked' && trace) {
     lanePill.className = 'pill';

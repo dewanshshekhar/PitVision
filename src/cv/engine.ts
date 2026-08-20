@@ -4,6 +4,7 @@ import { normaliseSignals, wetnessIndex, type Calibration } from './calibration'
 import { ConditionClassifier } from './classify';
 import { analyseFrame, toSignals } from './metrics';
 import { LaneTracker, type LaneStatus } from './lane';
+import { SegmentationClient } from './segclient';
 import { corridorFromRoad, corridorFromTrace, type Corridor } from './rois';
 
 /** Anything that can be drawn into a canvas: a <video> or the synthetic scene. */
@@ -70,8 +71,22 @@ export class CvEngine {
    */
   readonly lane = new LaneTracker();
 
+  /**
+   * Optional neural road segmentation, when a sidecar is installed.
+   *
+   * Sits above the geometric tracer rather than replacing it. A network trained
+   * on real driving footage finds the road through spray, at night and across
+   * patched tarmac far better than a heuristic can — but it is optional
+   * infrastructure, and a detector that stops working when a Python process is
+   * not running would be a worse detector than the one it replaced.
+   */
+  readonly segmenter = new SegmentationClient();
+
   /** The corridor the last pass actually measured through. */
   lastCorridor: Corridor | null = null;
+
+  /** Which of the three sources produced it. */
+  lastCorridorSource: 'segmentation' | 'traced' | 'manual' = 'manual';
 
   private ema: { road?: number; line?: number; edge?: number } = {};
   private classifier: ConditionClassifier;
@@ -114,6 +129,7 @@ export class CvEngine {
     // The previous corridor described a different road. Carrying it over would
     // measure the new feed through the old feed's geometry.
     this.lane.reset();
+    this.segmenter.reset();
   }
 
   setCalibration(c: Calibration) {
@@ -276,14 +292,37 @@ export class CvEngine {
     }
     const img = this.ctx.getImageData(0, 0, this.sampleW, this.sampleH);
 
-    // Trace first, then measure through whatever the trace found.
+    // Find the road, then measure through whatever found it.
     //
-    // Falling back to the hand-placed trapezoid rather than refusing: the
-    // manual ROI is still the answer for a camera the tracer cannot read, and
-    // an operator who has aimed it deliberately should not have it overridden
-    // by a trace that is guessing.
-    const trace = this.cal.laneAuto ? this.lane.update(img) : null;
-    const corridor = trace ? corridorFromTrace(trace) : corridorFromRoad(this.cal.road);
+    // Three sources, in order of how much they know, each falling back to the
+    // next. Nothing here can leave the detector without a region: the manual
+    // trapezoid is always available, which is what makes the two automatic
+    // sources safe to depend on.
+    //
+    //   1. Segmentation — a network trained on real driving footage. Optional,
+    //      asked a few times a second, absent on most installs.
+    //   2. Geometric tracing — in-browser, always available, half a millisecond.
+    //   3. The hand-placed trapezoid — the answer for a camera neither can
+    //      read, and an override an operator who has aimed it deliberately
+    //      should not have taken away from them.
+    let corridor: Corridor;
+    if (!this.cal.laneAuto) {
+      corridor = corridorFromRoad(this.cal.road);
+      this.lastCorridorSource = 'manual';
+    } else {
+      const segmented = this.segmenter.update(() => this.snapshot(640, 0.7));
+      const traced = this.lane.update(img);
+      if (segmented) {
+        corridor = corridorFromTrace(segmented);
+        this.lastCorridorSource = 'segmentation';
+      } else if (traced) {
+        corridor = corridorFromTrace(traced);
+        this.lastCorridorSource = 'traced';
+      } else {
+        corridor = corridorFromRoad(this.cal.road);
+        this.lastCorridorSource = 'manual';
+      }
+    }
     this.lastCorridor = corridor;
 
     const metrics = analyseFrame(img, corridor, { v: this.cal.glareV, s: this.cal.glareS });

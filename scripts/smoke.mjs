@@ -678,6 +678,32 @@ async function run() {
     check('a wrong token is rejected', wrong.status === 401, String(wrong.status));
   }
 
+  section('The segmenter proxy degrades instead of erroring');
+  {
+    // This server has no PITVISION_SEGMENTER_URL, which is the configuration
+    // most deployments run. The browser polls this endpoint several times a
+    // second regardless, so "not configured" has to be an ordinary answer
+    // rather than an error — otherwise every install without a model gets a
+    // console full of failures for a setup that is working as intended.
+    const health = await api('GET', '/segment/health');
+    check('health reports the segmenter as unconfigured', health.body?.configured === false);
+    check('and says why', typeof health.body?.reason === 'string' && health.body.reason.length > 0);
+
+    const codes = [];
+    for (let i = 0; i < 6; i++) {
+      const res = await api('POST', '/segment', { image: 'data:image/jpeg;base64,AAAA' }, { allowError: true });
+      codes.push(res.status);
+    }
+    check('every call is a 200, never a 5xx', codes.every((c) => c === 200), codes.join(','));
+
+    const one = await api('POST', '/segment', { image: 'data:image/jpeg;base64,AAAA' });
+    check('the corridor is explicitly null', one.body?.corridor === null);
+    check('with a reason the client can show', typeof one.body?.reason === 'string');
+
+    const bad = await api('POST', '/segment', {}, { allowError: true });
+    check('a request with no image is still a 400', bad.status === 400, String(bad.status));
+  }
+
   section('Metrics');
   {
     const metrics = await api('GET', '/metrics');

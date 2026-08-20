@@ -18,6 +18,7 @@ import { clientKey } from './lib/client.ts';
 import { healthRoutes } from './routes/health.ts';
 import { sessionRoutes } from './routes/sessions.ts';
 import { verifyRoutes } from './routes/verify.ts';
+import { segmentRoutes } from './routes/segment.ts';
 import { streamRoutes } from './routes/stream.ts';
 import { opsRoutes } from './routes/ops.ts';
 
@@ -77,6 +78,7 @@ export function createApp(ctx: Ctx): express.Express {
   // base64 frame and needs room; telemetry ingest carries numbers, and a 12 MB
   // ceiling on it is just an invitation to fill the heap.
   app.use('/api/verify', express.json({ limit: '12mb' }));
+  app.use('/api/segment', express.json({ limit: '12mb' }));
   app.use('/api', express.json({ limit: '1mb' }));
 
   // ── Auth ─────────────────────────────────────────────────────────────
@@ -112,6 +114,8 @@ export function createApp(ctx: Ctx): express.Express {
   app.use('/api', streamRoutes(ctx));
   app.use('/api', sessionRoutes(ctx));
   app.use('/api', verifyRoutes(ctx));
+  // Frames go to the segmenter, so it shares the verify body limit.
+  app.use('/api', segmentRoutes(ctx));
 
   app.use(
     '/api',

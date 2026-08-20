@@ -71,6 +71,13 @@ export interface Config {
   monitorTickMs: number;
   /** Sessions with no traffic for this long are auto-closed as abandoned. */
   sessionIdleMs: number;
+  /**
+   * Base URL of the road-segmentation sidecar, or empty when there is none.
+   *
+   * Optional by design. Without it the detector uses the in-browser geometric
+   * tracer, which is the configuration most deployments will run.
+   */
+  segmenterUrl: string;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   trustProxy: boolean;
   monitor: MonitorThresholds;
@@ -99,6 +106,7 @@ export function loadConfig(): Config {
     retentionDays: num('PITVISION_RETENTION_DAYS', 30, { min: 1, max: 3650 }),
     monitorTickMs: num('PITVISION_MONITOR_TICK_MS', 2000, { min: 250, max: 60_000 }),
     sessionIdleMs: num('PITVISION_SESSION_IDLE_MS', 300_000, { min: 10_000 }),
+    segmenterUrl: str('PITVISION_SEGMENTER_URL', '').replace(/\/+$/, ''),
     logLevel: logLevel as Config['logLevel'],
     trustProxy: bool('PITVISION_TRUST_PROXY', false),
     monitor: {

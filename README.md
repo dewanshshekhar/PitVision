@@ -286,6 +286,28 @@ produces "no road", not a corridor across the wall. If the trace is lost for mor
 seconds the backend raises an incident, because that failure has no visible symptom: the
 readings keep arriving, correctly computed, over a region that is no longer the track.
 
+### A trained model, when you want one
+
+The tracer above is a heuristic, and a good one — but a network trained on real
+driving footage finds the road through spray, at night and across patched tarmac
+more reliably than any heuristic can. That is available as an optional sidecar:
+
+| | Where it runs | Cost | Needs |
+|---|---|---|---|
+| **Segmentation** | Python sidecar | ~30–80 ms, asked 2–3×/s | a model file |
+| **Geometric tracing** | browser | 0.42 ms, 4×/s | nothing |
+| **Hand-placed ROI** | browser | free | someone to aim it |
+
+Each falls back to the next, so nothing can leave the detector without a region.
+The sidecar is optional and most installations will never run one; when it is
+absent the endpoint answers "not configured" as an ordinary reply rather than an
+error, and the tracer carries on.
+
+Models come from **BDD100K** — 100k real driving videos spanning rain, night and
+glare, which is the reason for choosing them over anything trained on clean
+daytime footage. The domain gap to a race track is real and documented, along
+with setup, calibration and fine-tuning, in **[ml/README.md](ml/README.md)**.
+
 ### Cost
 
 | Resolution | Median | p95 |
@@ -304,7 +326,19 @@ that it follows a curve rather than fitting a box, that it refuses when there is
 and that kerbs, markings and bodywork do not pull it off the tarmac.
 
 **Manual override** is still there. Turn tracing off in **Calibration & ROI** and aim the
-trapezoid by hand — the right answer for a camera the tracer cannot read.
+trapezoid by hand — the right answer for a camera neither automatic source can read.
+
+### Calibrate before race day
+
+```bash
+python ml/scripts/calibrate.py footage/*.mp4 --out calibration.json
+```
+
+The browser anchors itself from a live feed in about fifteen seconds, which is
+fine for a practice session and not fine for the moment the lights go out. This
+measures the anchors — and the tracer's own thresholds, which were chosen against
+generated scenes rather than real tarmac — from your footage, offline, so the app
+starts already anchored. See [ml/README.md](ml/README.md).
 
 ---
 
@@ -450,6 +484,16 @@ server/          the backend — recording, monitoring, reporting  (docs/BACKEND
 scripts/
   smoke.mjs      end-to-end API test
   lane-test.mjs  lane tracer, headless, against synthetic roads
+  roi-test.mjs   proves nothing outside the road reaches the sampler
+ml/            optional road segmentation, calibration and fine-tuning (ml/README.md)
+```
+
+## Tests
+
+```bash
+npm test        # typecheck + 21 lane + 12 ROI-isolation + 83 API checks
+npm run test:ml # 107 Python checks: mask→corridor, ONNX path, HTTP, calibration
+npm run test:all
 ```
 
 `window.pitvision` exposes the engine, source and calibration in the console for

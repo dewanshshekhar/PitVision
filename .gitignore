@@ -9,3 +9,11 @@ public/footage/*
 
 # The telemetry database
 data/
+
+# Python virtualenv and downloaded model weights
+.venv/
+ml/models/
+dataset/
+calibration.json
+__pycache__/
+*.pyc

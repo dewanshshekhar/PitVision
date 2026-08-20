@@ -15,7 +15,9 @@
     "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.mjs",
     "test:lane": "node --disable-warning=ExperimentalWarning scripts/lane-test.mjs",
     "test": "npm run typecheck && npm run test:lane && npm run test:roi && npm run smoke",
-    "test:roi": "node --disable-warning=ExperimentalWarning --import ./scripts/ts-resolve.mjs scripts/roi-test.mjs"
+    "test:roi": "node --disable-warning=ExperimentalWarning --import ./scripts/ts-resolve.mjs scripts/roi-test.mjs",
+    "test:ml": ".venv/bin/python ml/tests/run_all.py",
+    "test:all": "npm test && npm run test:ml"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.118.0",
