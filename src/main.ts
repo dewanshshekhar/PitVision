@@ -394,7 +394,7 @@ engine.start();
 // Exposed for calibration work and for poking at the pipeline from the console.
 Object.assign(window, {
   pitvision: {
-    engine, source, verifier, overlay, chart, strip, particles, alerts,
+    engine, source, verifier, telemetry, overlay, chart, strip, particles, alerts,
     get cal() { return cal; },
     /** Force a repaint of every canvas layer. */
     repaint() {
