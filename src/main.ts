@@ -8,6 +8,7 @@ import { SCENARIO_LENGTH } from './source/synthetic';
 import { suggest } from './strategy/suggest';
 import { Verifier } from './ai/verify';
 import { runPreRaceCheck, type Check } from './cv/prerace';
+import { loadPreWarmSeed } from './cv/prewarm';
 import { AlertFeed } from './ui/alerts';
 import { Overlay } from './ui/overlay';
 import { TrendChart } from './ui/trend';
@@ -632,17 +633,16 @@ async function preRace(calibrate = true) {
   verdict.className = 'tag';
   verdict.textContent = 'running…';
 
-  // The engine must stand still while the check seeks around the clip,
-  // otherwise it records the scan itself as a wild condition swing.
-  engine.stop();
-  source.seeking = true;
+  // Nothing here pauses playback or seeks any more — calibration watches the
+  // footage as it plays, and every probe the check makes bypasses session
+  // history, so there is nothing to isolate the readout from.
   try {
     const result = await runPreRaceCheck(source, engine, cal, renderChecks, {
       calibrate,
-      // A live feed hands back usable anchors early and keeps refining them
-      // behind the session. Each refinement is applied as it arrives, so the
-      // scale tightens under a readout that never stopped.
-      onLiveRefine: (refined) => {
+      // Calibration runs for the whole footage now: usable anchors arrive
+      // within seconds and keep being refined. Each refinement is applied as
+      // it lands, so the scale tightens under a readout that never stopped.
+      onRefine: (refined) => {
         cal = refined;
         engine.setCalibration(cal);
         saveCalibration(cal);
@@ -684,10 +684,9 @@ async function preRace(calibrate = true) {
         : result.checks.find((c) => c.state === 'fail')?.detail ?? 'Pipeline warm and inside budget.',
     });
   } finally {
-    source.seeking = false;
-    engine.clearHistory();
+    // The engine was never stopped, so there is nothing to restart — and the
+    // history recorded during the check is real footage, not scan artefacts.
     alerts.suppress(1200);
-    engine.start();
     checkRunning = false;
     btn.disabled = btn2.disabled = false;
   }
@@ -858,6 +857,21 @@ window.setInterval(() => {
   const panel = document.getElementById('cal-panel') as HTMLDetailsElement | null;
   if (panel?.open) calPanel.refreshAnchors();
 }, 700);
+
+// ── Pre-warm ───────────────────────────────────────────────────────────
+// An offline calibration from ml/scripts/calibrate.py, served at
+// /calibration.json, seeds the anchors once at startup so the very first
+// readings sit on measured numbers instead of synthetic-scene defaults. The
+// real-time calibration refines from there on whatever footage loads. Absent
+// file: silent no-op — that is the normal case, not an error.
+void loadPreWarmSeed().then((seed) => {
+  if (!seed) return;
+  cal = { ...cal, ...seed, signature: '' };
+  engine.setCalibration(cal);
+  saveCalibration(cal);
+  calPanel.syncAll();
+  toast('Pre-warm calibration loaded from /calibration.json');
+});
 
 // ── Keyboard shortcuts (demo ergonomics) ───────────────────────────────
 window.addEventListener('keydown', (e) => {

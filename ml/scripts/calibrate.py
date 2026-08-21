@@ -471,8 +471,8 @@ def main(argv: list[str] | None = None) -> int:
         print("  \033[33mWARNING\033[0m: the road was found in under half the frames. These anchors\n"
               "  describe a biased sample — the frames where finding it was easy.\n", file=sys.stderr)
 
-    print(f"  Load it in the app: Calibration & ROI → Import, or serve it at "
-          f"/calibration.json\n", file=sys.stderr)
+    print("  Load it in the app: copy it to public/calibration.json and reload —\n"
+          "  the app imports it automatically at startup as its pre-warm seed.\n", file=sys.stderr)
     return 0
 
 

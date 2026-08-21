@@ -168,41 +168,49 @@ interface Seed {
 }
 
 /**
- * Find somewhere to start.
+ * Find somewhere to start on the open track ahead of the car.
  *
- * The trace has to begin on tarmac, and where tarmac is depends entirely on the
- * camera: a trackside shot has road across the lower half, an onboard camera
- * has the car's nose there and road above it, a cockpit view has mirrors and
- * bodywork down both sides. Assuming any of those is how the old fixed
- * trapezoid ended up measuring a Ferrari instead of a race track.
- *
- * So candidate patches are scored on what tarmac actually is — grey, mid-bright,
- * and *uniform across its width*, which is the test that separates a road from
- * a car (painted panels are uniform too, but coloured) and from grass (green,
- * and much noisier row to row).
+ * On an onboard / cockpit camera:
+ * - The car's nosecone, front wheels, and cockpit occupy the lower portion (y >= 0.58).
+ * - The clear, unobstructed road is in the mid-depth window (y between searchTop and ~0.56).
+ * - A true track spans across the full width of the view — extending BOTH to the left of the
+ *   car and to the right of the car (left < 0.35, right > 0.65).
+ * - An isolated patch between the tyre and nosecone only spans one side and is rejected.
  */
-function findSeed(img: ImageData, opts: TraceOptions): Seed | null {
+function findSeed(img: ImageData, opts: TraceOptions, priorCenterX = 0.5): Seed | null {
   const { width: w, height: h } = img;
   const luma = lumaBuf!;
   const sat = satBuf!;
 
   let best: Seed | null = null;
 
-  // Search upward from the bottom of the region: the nearest road is the most
-  // reliable place to lock on, being the largest and least foreshortened.
-  const yStart = Math.floor(opts.searchBottom * h) - 2;
-  const yEnd = Math.floor(opts.searchTop * h);
+  // Search candidate depths in the open road zone ahead of the car hood
+  const yStart = Math.floor(Math.min(0.70, opts.searchBottom) * h);
+  const yEnd = Math.ceil(opts.searchTop * h);
 
-  for (let y = yStart; y > yEnd; y -= 3) {
+  const paintGap = Math.max(4, Math.round(w * 0.04));
+
+  for (let y = yStart; y >= yEnd; y -= 2) {
     if (y < 1 || y >= h - 1) continue;
     const row = y * w;
+    const ny = y / h;
 
-    // Try a few horizontal positions — the road is not always centred, and on a
-    // corner entry it can be well off to one side.
-    for (const cx of [0.5, 0.38, 0.62, 0.28, 0.72]) {
-      const x0 = Math.max(1, Math.floor((cx - 0.06) * w));
-      const x1 = Math.min(w - 2, Math.ceil((cx + 0.06) * w));
-      if (x1 - x0 < 4) continue;
+    // Test positions centered on the forward track view
+    const candidateXs = [
+      priorCenterX,
+      0.5,
+      priorCenterX - 0.08,
+      priorCenterX + 0.08,
+      0.44,
+      0.56,
+      priorCenterX - 0.16,
+      priorCenterX + 0.16,
+    ].filter((x, idx, arr) => x >= 0.20 && x <= 0.80 && arr.indexOf(x) === idx);
+
+    for (const cx of candidateXs) {
+      const x0 = Math.max(1, Math.floor((cx - 0.04) * w));
+      const x1 = Math.min(w - 2, Math.ceil((cx + 0.04) * w));
+      if (x1 - x0 < 3) continue;
 
       let sumL = 0;
       let sumS = 0;
@@ -216,8 +224,7 @@ function findSeed(img: ImageData, opts: TraceOptions): Seed | null {
       const meanL = sumL / n;
       const meanS = sumS / n;
 
-      // Blown-out or black patches carry no surface information either way.
-      if (meanL < 22 || meanL > 232) continue;
+      if (meanL < 18 || meanL > 248) continue;
       if (meanS > opts.maxSat) continue;
 
       let varL = 0;
@@ -227,45 +234,75 @@ function findSeed(img: ImageData, opts: TraceOptions): Seed | null {
       }
       varL /= n;
 
-      // Prefer grey over merely dark, uniform over speckled, and lower in the
-      // frame over higher — nearer road is bigger and better resolved.
+      // Span test: walk left and right with paint-gap tolerance across white lines
+      const px = Math.round((x0 + x1) / 2);
+      let leftSpan = px;
+      let rightSpan = px;
+      let pMiss = 0;
+
+      for (let x = px - 1; x >= 1; x--) {
+        const s = sat[row + x];
+        const l = luma[row + x];
+        if (s > opts.maxSat) break;
+        if (Math.abs(l - meanL) <= opts.lumaTolerance * 1.4) {
+          leftSpan = x;
+          pMiss = 0;
+        } else {
+          if (++pMiss > paintGap) break;
+        }
+      }
+
+      pMiss = 0;
+      for (let x = px + 1; x < w - 1; x++) {
+        const s = sat[row + x];
+        const l = luma[row + x];
+        if (s > opts.maxSat) break;
+        if (Math.abs(l - meanL) <= opts.lumaTolerance * 1.4) {
+          rightSpan = x;
+          pMiss = 0;
+        } else {
+          if (++pMiss > paintGap) break;
+        }
+      }
+
+      const lNorm = leftSpan / w;
+      const rNorm = rightSpan / w;
+      const spanNorm = rNorm - lNorm;
+
+      if (spanNorm < opts.minWidth) continue;
+
+      const spansCenter = lNorm <= 0.48 && rNorm >= 0.52;
+      const spansBothSides = lNorm <= 0.38 && rNorm >= 0.62;
+
       const greyness = 1 - meanS / opts.maxSat;
       const flatness = 1 / (1 + varL / 260);
-      const nearness = (y - yEnd) / Math.max(1, yStart - yEnd);
-      const score = greyness * 0.5 + flatness * 0.3 + nearness * 0.2;
 
-      if (!best || score > best.score) best = { y, x: Math.round((x0 + x1) / 2), luma: meanL, score };
+      // Prefer road depth in open area ahead of the nose (y ~ 0.48 - 0.54)
+      const depthScore = 1 - Math.min(1, Math.abs(ny - 0.50) / 0.28);
+      const spanScore = Math.min(1, spanNorm / 0.50);
+      const centerDist = Math.abs(cx - priorCenterX);
+      const centerScore = 1 - Math.min(1, centerDist / 0.35);
+      const fullRoadBonus = spansBothSides ? 0.35 : spansCenter ? 0.15 : -0.30;
+
+      const score =
+        greyness * 0.25 +
+        flatness * 0.15 +
+        spanScore * 0.30 +
+        depthScore * 0.15 +
+        centerScore * 0.15 +
+        fullRoadBonus;
+
+      if (!best || score > best.score) {
+        best = { y, x: px, luma: meanL, score };
+      }
     }
   }
 
-  // A weak best is no lock at all. Reporting "no road found" is the honest
-  // outcome and the app can say so, rather than tracing a corridor across the
-  // sky and reporting a wetness index for it.
-  return best && best.score > 0.42 ? best : null;
+  return best && best.score > 0.36 ? best : null;
 }
 
 /**
  * Walk left and right from a centre point while the surface holds.
- *
- * `reference` is the luma the surface is expected to sit near, re-estimated per
- * row by the caller.
- *
- * A run has to survive breaks, because the road is not a uniform grey strip: it
- * carries white lines, tyre marks, shadows and puddle edges, and stopping at
- * the first one clips the corridor to a fraction of the tarmac. But it must not
- * survive *every* break, or it walks straight off the track and onto the grass.
- *
- * The two are told apart by which test the pixel fails, which is a physical
- * distinction rather than a tuned one:
- *
- * - Fails on luma but is still near-colourless → paint, shadow or a wet patch.
- *   Still road. Tolerated across a wide gap.
- * - Fails on saturation → a different material entirely: grass, kerbing,
- *   bodywork, gravel. Tolerated across almost nothing.
- *
- * Using one gap budget for both is what let a five-pixel white line split the
- * corridor while an eleven-pixel kerb was the thing the budget had been sized
- * against.
  */
 function scanRow(
   y: number,
@@ -273,20 +310,7 @@ function scanRow(
   seedReference: number,
   w: number,
   opts: TraceOptions,
-  /**
-   * Width of the previous row, in pixels, or 0 at the seed.
-   *
-   * Perspective changes the road's width smoothly and slowly between adjacent
-   * sampled rows; a scene opening out into sky does not.
-   */
   prevWidth: number,
-  /**
-   * Which way this row is from the one before it: -1 toward the horizon,
-   * +1 toward the camera.
-   *
-   * The two directions are not symmetric and treating them as if they were is
-   * what let the corridor run away — see the width clamp at the end.
-   */
   direction: number,
 ): { l: number; r: number; sumL: number; sumS: number; n: number; variance: number } | null {
   let cx = seedX;
@@ -296,29 +320,23 @@ function scanRow(
   const row = y * w;
   const tol = opts.lumaTolerance;
 
-  // Scaled to the frame so the behaviour does not change with sample width.
-  // ~3% of width spans a track marking; a kerb or a verge is far wider.
-  const paintGap = Math.max(4, Math.round(w * 0.03));
-  const materialGap = 2;
+  const paintGap = Math.max(4, Math.round(w * 0.04));
+  const materialGap = 3;
 
   let sumL = 0;
   let sumL2 = 0;
   let sumS = 0;
   let n = 0;
 
-  /** 2 = surface, 1 = a break that is still road-coloured, 0 = another material. */
+  /** 2 = surface, 1 = break that is still road-coloured (paint/wet/shadow), 0 = another material. */
   const test = (x: number): 0 | 1 | 2 => {
+    if (x < 1 || x > w - 2) return 0;
     if (sat[row + x] > opts.maxSat) return 0;
     return Math.abs(luma[row + x] - reference) <= tol ? 2 : 1;
   };
 
   if (cx < 1 || cx > w - 2) return null;
 
-  // The starting point can land on something that is not the surface — most
-  // often a painted line, since those run down the middle of a road and the
-  // scan is handed the middle of the road. Giving up there loses the row, and
-  // losing every row loses the trace. Step aside and look for the surface
-  // within a marking's width before concluding there is none.
   if (test(cx) !== 2) {
     let recovered = -1;
     for (let d = 1; d <= paintGap; d++) {
@@ -329,42 +347,14 @@ function scanRow(
     if (recovered >= 0) {
       cx = recovered;
     } else {
-      // Nothing within reach matches the carried brightness — but the road may
-      // still be right here and simply be a different brightness than the row
-      // below it. That is not a corner case on a wet track, it is the normal
-      // case: a sheet of water reflecting the sky is far brighter than the dry
-      // tarmac a few metres nearer, and a shadow is far darker. The reference
-      // adapts row to row, but only from accepted pixels, so a band that
-      // spans the full width across several rows accepts nothing and the
-      // reference never moves. The trace then stops dead — precisely at the
-      // standing water it exists to measure.
-      //
-      // Saturation is the test that still holds when brightness does not.
-      // Asphalt is near-colourless whether it is wet, dry, sunlit or shadowed;
-      // grass, kerbing and bodywork are not. So when brightness continuity
-      // fails but the material test still passes across a real span, trust the
-      // material and re-baseline the brightness to what is actually here.
       let lo = cx;
       let hi = cx;
       while (lo > 1 && sat[row + lo - 1] <= opts.maxSat) lo--;
       while (hi < w - 2 && sat[row + hi + 1] <= opts.maxSat) hi++;
 
-      // Demand a real span before re-baselining. A couple of desaturated
-      // pixels is a highlight on a kerb, not a road surface.
       if (hi - lo < Math.max(6, w * 0.05)) return null;
 
-      // Saturation alone is not enough here, and this is the trap: a
-      // blown-out white sky is *also* near-colourless. Relaxing brightness
-      // continuity to survive standing water opens the door to the sky
-      // directly above it, and the trace walks straight up into it — which is
-      // the one failure this whole region exists to prevent.
-      //
-      // Having given up the brightness anchor, the row needs a different one,
-      // and geometry is the natural choice. Perspective changes the road's
-      // width smoothly between adjacent sampled rows — a few per cent across
-      // 48 rows. A scene opening out into sky does not: it jumps. So a
-      // re-baselined row may not be much wider than the row it grew from.
-      const cap = prevWidth > 0 ? prevWidth * 1.6 : w * 0.55;
+      const cap = prevWidth > 0 ? (direction < 0 ? prevWidth * 1.04 : prevWidth * 1.65) : w * 0.55;
       if (hi - lo > cap) return null;
 
       let sum = 0;
@@ -406,50 +396,8 @@ function scanRow(
   let l = walk(cx, -1, 1);
   let r = walk(cx + 1, 1, w - 2);
 
-  // Perspective is monotonic, and that is the invariant that keeps the trace
-  // on the road.
-  //
-  // A road under a fixed camera cannot get *wider* as it recedes. Nothing in
-  // the pixel tests knows that, and in heavy rain they stop being able to tell
-  // road from anything else: measured on this project's own rain scene, the
-  // horizon row reads luma 80–122 at saturation 0.15–0.18, while the wet tarmac
-  // it is being compared against reads luma 69. The darkened sky is grey and
-  // mid-dark, which is the definition of asphalt as far as `test()` is
-  // concerned — 99% of that row passes both checks. The scan walked up to the
-  // horizon and spread across the entire frame, reporting a corridor 0.998 of
-  // the frame wide at the top and 0.300 at the bottom: a road narrower at the
-  // camera than at the horizon, which is impossible.
-  //
-  // Brightness continuity cannot catch it either, because under uniform rain
-  // the sky and the road *are* the same brightness. Geometry can. Walking
-  // toward the horizon a row may not meaningfully exceed the row below it;
-  // walking toward the camera it may widen, because that is the direction
-  // perspective actually widens in.
-  // Perspective is monotonic, and that is what keeps the trace out of the sky.
-  //
-  // A road under a fixed camera cannot get dramatically *wider* as it recedes.
-  // Nothing in the two pixel tests knows that, and under heavy rain they stop
-  // being able to tell road from sky at all: measured on this project's own
-  // rain scene, the horizon row reads luma 80–122 at saturation 0.15–0.18 while
-  // the wet tarmac it is compared against reads luma 69. A rain-darkened sky is
-  // grey and mid-dark, which is the definition of asphalt as far as `test()` is
-  // concerned — 99% of that row passed both checks. The scan walked up into it
-  // and spread across the whole frame, reporting a corridor 0.998 of the frame
-  // wide at the horizon and 0.300 at the camera: a road narrower where it is
-  // nearest, which cannot happen.
-  //
-  // Brightness continuity cannot catch it, because under uniform rain the sky
-  // and the road are the same brightness. Texture cannot be used either: it
-  // separates them cleanly, but it also rejects standing water and sun glint,
-  // which are smooth by nature and are exactly what this pipeline exists to
-  // measure.
-  //
-  // Geometry is left, and it is enough. A row that balloons past what
-  // perspective allows is *rejected* rather than trimmed to fit — trimming
-  // invents a plausible corridor out of pixels that are not road, while
-  // rejecting stops the trace where the evidence stops, which is the answer
-  // this project prefers everywhere else.
-  if (prevWidth > 0 && r - l > prevWidth * (direction < 0 ? 1.35 : 2.0)) {
+  // Perspective is strictly monotonic: road narrows toward horizon (-1), widens toward camera (+1)
+  if (prevWidth > 0 && r - l > prevWidth * (direction < 0 ? 1.04 : 1.85)) {
     return null;
   }
 
@@ -460,24 +408,13 @@ function scanRow(
 
 /**
  * Least-squares quadratic through the measured boundary points.
- *
- * Quadratic, not a free curve: a road under a fixed camera is a smooth arc, and
- * three coefficients are enough to express one while being far too stiff to
- * chase a kerb or a car that clipped one row. Rows the scan missed are then
- * filled from the fit, which is what lets the corridor stay whole when
- * something crosses it.
  */
 function fitQuadratic(xs: Float32Array, mask: Uint8Array, n: number): [number, number, number] | null {
-  // Fitted against row *index*, not pixel y. The rows are sampled evenly, so
-  // the two are related by a constant and the fit is identical — while the
-  // index is already normalised, which keeps the normal equations conditioned
-  // without a separate rescaling step.
   let s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0;
   let t0 = 0, t1 = 0, t2 = 0;
 
   for (let i = 0; i < n; i++) {
     if (!mask[i]) continue;
-    // Normalised row index keeps the normal equations well conditioned.
     const u = i / n;
     const u2 = u * u;
     s0 += 1;
@@ -489,9 +426,8 @@ function fitQuadratic(xs: Float32Array, mask: Uint8Array, n: number): [number, n
     t1 += xs[i] * u;
     t2 += xs[i] * u2;
   }
-  if (s0 < 6) return null;
+  if (s0 < 5) return null;
 
-  // Solve the 3x3 normal equations by Cramer's rule.
   const det =
     s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2);
   if (Math.abs(det) < 1e-9) return null;
@@ -508,11 +444,12 @@ function fitQuadratic(xs: Float32Array, mask: Uint8Array, n: number): [number, n
 
 /**
  * Trace the road in one frame.
- *
- * Returns null when nothing road-like was found, which is a real answer: a
- * camera pointed at the pit garage should produce "no road", not a corridor.
  */
-export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPTIONS): LaneTrace | null {
+export function traceLane(
+  img: ImageData,
+  opts: TraceOptions = DEFAULT_TRACE_OPTIONS,
+  priorCenterX = 0.5,
+): LaneTrace | null {
   const { width: w, height: h } = img;
   if (w < 32 || h < 32) return null;
 
@@ -523,7 +460,7 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
 
   prepare(img, y0, y1);
 
-  const seed = findSeed(img, opts);
+  const seed = findSeed(img, opts, priorCenterX);
   if (!seed) return null;
 
   rowFound.fill(0);
@@ -532,9 +469,6 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
   let surfSumS = 0;
   let surfN = 0;
 
-  // Rows are indexed far (0) to near (ROWS-1). The scan runs the other way,
-  // from the seed outward in both directions, because each row's search has to
-  // start from a row that has already been located.
   for (let i = 0; i < ROWS; i++) {
     rowY[i] = Math.round(y0 + ((y1 - y0) * i) / (ROWS - 1));
   }
@@ -548,12 +482,28 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
     let prevWidth = 0;
 
     for (let i = from; step > 0 ? i <= to : i >= to; i += step) {
-      const hit = scanRow(rowY[i], cx, reference, w, opts, prevWidth, step);
+      const cy = rowY[i];
+
+      // On downward scan (approaching vehicle): stop when central road hits car hood / nosecone
+      if (step > 0 && cy > 0.52 * h) {
+        const centerOffset = Math.round(w * 0.06);
+        const c1 = Math.max(1, cx - centerOffset);
+        const c2 = Math.min(w - 2, cx + centerOffset);
+        let centerSat = 0;
+        let cnt = 0;
+        for (let x = c1; x <= c2; x++) {
+          centerSat += satBuf![cy * w + x];
+          cnt++;
+        }
+        // Livery color / car bodywork in center indicates the road has ended at the car nose
+        if (cnt > 0 && centerSat / cnt > opts.maxSat * 1.1) {
+          break;
+        }
+      }
+
+      const hit = scanRow(cy, cx, reference, w, opts, prevWidth, step);
 
       if (!hit) {
-        // Several consecutive failures mean the surface has genuinely ended —
-        // the horizon above, the car's bodywork below. Keep going a little in
-        // case it was one shadow or one car crossing the frame.
         if (++misses > 3) break;
         continue;
       }
@@ -568,32 +518,17 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
       surfSumS += hit.sumS;
       surfN += hit.n;
 
-      // Carry the centre and the surface reference into the next row. This is
-      // what makes it follow a corner: the search for each row starts where the
-      // road was one row closer, not where a fixed shape says it should be.
       cx = Math.round((hit.l + hit.r) / 2);
       prevWidth = hit.r - hit.l;
       reference = reference * 0.6 + (hit.sumL / hit.n) * 0.4;
     }
   };
 
-  walk(seedIdx, ROWS - 1, 1); // toward the camera
+  walk(seedIdx, ROWS - 1, 1); // toward the camera / vehicle
   walk(seedIdx - 1, 0, -1); // toward the horizon
 
-  if (measured < 10) return null;
+  if (measured < 8) return null;
 
-  const fitL = fitQuadratic(leftRaw, rowFound, ROWS);
-  const fitR = fitQuadratic(rightRaw, rowFound, ROWS);
-  if (!fitL || !fitR) return null;
-
-  // The corridor is reported only across the rows the scan actually reached.
-  //
-  // The fit is defined over the whole search region, and evaluating it there
-  // would hand back a confident corridor covering rows where no road was ever
-  // seen — on an onboard camera, straight over the car's own nose. Filling an
-  // interior gap is the fit doing its job; extending past both ends of the
-  // evidence is inventing road, which is the failure mode this whole pipeline
-  // is built to avoid.
   let first = -1;
   let last = -1;
   for (let i = 0; i < ROWS; i++) {
@@ -603,18 +538,19 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
   }
   if (first < 0 || last - first < 6) return null;
 
+  const fitL = fitQuadratic(leftRaw, rowFound, ROWS);
+  const fitR = fitQuadratic(rightRaw, rowFound, ROWS);
+  if (!fitL || !fitR) return null;
+
   const left = new Float32Array(ROWS);
   const right = new Float32Array(ROWS);
   let widthSum = 0;
 
   for (let i = 0; i < ROWS; i++) {
-    // Resample the fit across the measured span, so the output still has ROWS
-    // entries but they cover only real road.
     const src = first + ((last - first) * i) / (ROWS - 1);
     const u = src / ROWS;
     let l = fitL[0] + fitL[1] * u + fitL[2] * u * u;
     let r = fitR[0] + fitR[1] * u + fitR[2] * u * u;
-    // The fit is unconstrained and can cross over near the ends.
     if (r < l) [l, r] = [r, l];
     left[i] = clamp(l, 0, 1);
     right[i] = clamp(r, 0, 1);
@@ -627,12 +563,10 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
   const span = last - first + 1;
 
   return {
-    yTop: rowY[first] / h,
+    yTop: Math.max(opts.searchTop, rowY[first] / h),
     yBot: rowY[last] / h,
     left,
     right,
-    // Fraction of the *reported* span that was measured rather than filled in,
-    // which is what a caller deciding whether to trust it actually wants.
     confidence: measured / span,
     measuredRows: measured,
     meanWidth,
@@ -646,23 +580,15 @@ export function traceLane(img: ImageData, opts: TraceOptions = DEFAULT_TRACE_OPT
 
 /**
  * How often the trace is recomputed.
- *
- * Not every frame, and that is the point. A road does not move between two
- * frames 40 ms apart — a camera pans, a car turns in, and both happen over
- * hundreds of milliseconds. Re-tracing at frame rate would spend the latency
- * budget re-deriving a shape that has not changed, on the one path the whole
- * pipeline is built to keep under 100 ms.
- *
- * Between traces the last corridor is used as-is, so the wetness readout still
- * updates on every frame; only the shape it is measured through holds still.
+ * 60 ms keeps real-time responsiveness for headcam movement while smoothing jitter.
  */
-const RETRACE_MS = 250;
+const RETRACE_MS = 60;
 
-/** Blend factor toward a new trace. Low enough that one bad frame cannot jump the corridor. */
-const TRACK_ALPHA = 0.35;
+/** Blend factor toward a new trace for silky-smooth tracking without jumpiness. */
+const TRACK_ALPHA = 0.22;
 
 /** Below this the trace is not trusted enough to measure through. */
-const MIN_CONFIDENCE = 0.55;
+const MIN_CONFIDENCE = 0.50;
 
 export type LaneState = 'searching' | 'locked' | 'lost';
 
@@ -676,14 +602,7 @@ export interface LaneStatus {
 }
 
 /**
- * Keeps a lane trace alive across frames.
- *
- * Two jobs beyond calling `traceLane`: rate-limiting it so it costs nothing on
- * the hot path, and smoothing successive traces so the corridor tracks the road
- * instead of twitching every time a car crosses it. A corridor that moves a few
- * per cent per frame would make the racing-line band a different strip of tarmac
- * each time, and the divergence signal — the entire basis of the dry-line call —
- * is a comparison between two strips that are supposed to stay put.
+ * Keeps a lane trace alive and rock-solid across frames.
  */
 export class LaneTracker {
   private current: LaneTrace | null = null;
@@ -721,8 +640,7 @@ export class LaneTracker {
   }
 
   /**
-   * Offer a frame. Returns the corridor to measure through, which may be the
-   * previous one if this frame was skipped or the trace failed.
+   * Offer a frame. Returns the corridor to measure through.
    */
   update(img: ImageData, now = performance.now()): LaneTrace | null {
     if (!this.enabled) return this.current;
@@ -730,19 +648,37 @@ export class LaneTracker {
     this.lastAttempt = now;
 
     const t0 = performance.now();
-    const fresh = traceLane(img, this.options);
+    // Use current corridor center as prior
+    const priorCenter = this.current
+      ? (this.current.left[Math.floor(ROWS / 2)] + this.current.right[Math.floor(ROWS / 2)]) / 2
+      : 0.5;
+
+    const fresh = traceLane(img, this.options, priorCenter);
     this.cost = performance.now() - t0;
 
     if (!fresh || fresh.confidence < MIN_CONFIDENCE) {
       this.misses++;
-      // Hold the last good corridor for a few seconds. A car crossing the
-      // frame, a burst of spray or a moment of glare will fail a trace, and
-      // dropping the ROI for that would blank the readout at exactly the
-      // moment someone is watching it. Past that, admit it is lost rather
-      // than keep measuring through a corridor that no longer describes
-      // anything in the picture.
-      if (this.misses > 12) this.current = null;
+      if (this.misses > 16) this.current = null;
       return this.current;
+    }
+
+    // Outlier rejection: if fresh candidate suddenly leaps across the frame (e.g. wheel / spray lock),
+    // don't immediately jump to it unless confirmed across consecutive frames.
+    if (this.current) {
+      const curCenter =
+        (this.current.left[Math.floor(ROWS / 2)] + this.current.right[Math.floor(ROWS / 2)]) / 2;
+      const freshCenter =
+        (fresh.left[Math.floor(ROWS / 2)] + fresh.right[Math.floor(ROWS / 2)]) / 2;
+      const centerDelta = Math.abs(freshCenter - curCenter);
+      const widthRatio = fresh.meanWidth / Math.max(1e-4, this.current.meanWidth);
+
+      // Sudden jump > 22% of screen width or extreme width change is treated as candidate outlier
+      if (centerDelta > 0.22 || widthRatio < 0.45 || widthRatio > 2.2) {
+        this.misses++;
+        if (this.misses < 4) {
+          return this.current;
+        }
+      }
     }
 
     this.misses = 0;

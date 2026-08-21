@@ -136,6 +136,12 @@ export class CvEngine {
     const wasAuto = this.cal?.laneAuto;
     this.cal = c;
     this.classifier.setCalibration(c);
+    // Tracer thresholds ride along with the calibration object so presets
+    // persist and the real-time calibration can tighten them as it measures.
+    // Written to the tracker's mutable options — the next natural retrace
+    // picks them up, without forcing a visible corridor jump.
+    this.lane.options.maxSat = c.traceMaxSat;
+    this.lane.options.lumaTolerance = c.traceLumaTolerance;
     // Re-trace immediately when automatic tracing is switched back on, rather
     // than leaving the readout on the manual ROI until the next interval.
     if (c.laneAuto && !wasAuto) this.lane.invalidate();

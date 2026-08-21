@@ -16,9 +16,12 @@ export interface AutoCalReport {
   /** Which anchoring path ran. Reported so the verdict can never disagree with it. */
   branch: 'measured-both-ends' | 'dry-anchored' | 'wet-anchored';
   note: string;
+  /**
+   * Lane-tracer thresholds measured from the same footage, once enough surface
+   * samples exist. Absent before that — the defaults hold until they don't.
+   */
+  tracer?: TracerThresholds;
 }
-
-export type Progress = (done: number, total: number) => void;
 
 /**
  * How a wet surface differs from the same surface dry, as offsets from a
@@ -113,23 +116,52 @@ function percentile(sorted: number[], p: number): number {
   return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
 }
 
-function seekTo(video: HTMLVideoElement, t: number, timeoutMs = 2500): Promise<void> {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      video.removeEventListener('seeked', finish);
-      resolve();
-    };
-    video.addEventListener('seeked', finish);
-    setTimeout(finish, timeoutMs);
-    try {
-      video.currentTime = t;
-    } catch {
-      finish();
-    }
-  });
+function round(v: number, dp: number): number {
+  const f = 10 ** dp;
+  return Math.round(v * f) / f;
+}
+
+/** The lane tracer's own admission constants, measured per footage. */
+export interface TracerThresholds {
+  /** How colourful a pixel may be and still count as tarmac. */
+  maxSat: number;
+  /** How far a row's brightness may drift from the reference and still match. */
+  lumaTolerance: number;
+}
+
+/** One frame's road-band surface reading, feeding the threshold measurement. */
+export interface SurfaceSample {
+  sat: number;
+  luma: number;
+}
+
+/**
+ * Measure the lane tracer's constants from observed road pixels.
+ *
+ * Ported from ml/scripts/calibrate.py's tracer_thresholds(). Both sets of
+ * constants were originally picked against generated scenes — uniform grey
+ * roads, which real tarmac is not. Patched repairs, sun bleaching,
+ * rubbered-in racing lines and standing water all widen the distribution, and
+ * a tolerance set on a synthetic road clips the corridor on a real one.
+ *
+ * Measured from the road band the detector already samples, so what the
+ * thresholds admit is exactly what the rest of the pipeline has been reading.
+ */
+export function tracerFrom(samples: SurfaceSample[]): TracerThresholds {
+  const sats = samples.map((s) => s.sat).sort((a, b) => a - b);
+  const lumas = samples.map((s) => s.luma).sort((a, b) => a - b);
+
+  // Admit almost all observed road saturation, with headroom — but never so
+  // much that vegetation would pass. 0.45 is where grass starts on real
+  // footage, so the ceiling sits below it whatever the measurement says.
+  const maxSat = Math.min(0.42, Math.max(0.18, percentile(sats, 0.98) * 1.35));
+
+  // Brightness spread between frames is a lower bound on the spread *within*
+  // a frame, which is what the row-to-row tolerance has to survive.
+  const lumaSpread = percentile(lumas, 0.95) - percentile(lumas, 0.05);
+  const lumaTolerance = Math.min(90, Math.max(30, lumaSpread * 0.75));
+
+  return { maxSat: round(maxSat, 4), lumaTolerance: round(lumaTolerance, 1) };
 }
 
 /**
@@ -298,76 +330,6 @@ function anchorsFrom(samples: Signals[]): AutoCalReport {
 export const __testAnchorsFrom = anchorsFrom;
 
 /**
- * Scan a clip end to end and derive calibration anchors from it.
- *
- * This is the honest version of "tune the thresholds against the real footage":
- * the driest tenth of the clip defines 0 and the wettest tenth defines 100, so
- * the index means the same thing regardless of camera, codec, or daylight. It
- * assumes the clip actually contains both extremes — which is exactly what the
- * demo footage is specified to contain — and says so plainly when it does not.
- */
-export async function autoCalibrateClip(
-  video: HTMLVideoElement,
-  engine: CvEngine,
-  frames = 40,
-  onProgress?: Progress,
-): Promise<AutoCalReport> {
-  const duration = video.duration;
-  if (!Number.isFinite(duration) || duration <= 0) {
-    throw new Error('Clip has no seekable duration — use the live calibration instead.');
-  }
-
-  const resumeAt = video.currentTime;
-  video.pause();
-
-  const samples: Signals[] = [];
-  try {
-    for (let i = 0; i < frames; i++) {
-      // Sample cell centres rather than edges: the first and last frames of a
-      // clip are often black or a fade.
-      const t = (duration * (i + 0.5)) / frames;
-      await seekTo(video, t);
-      const m = engine.probe();
-      if (m && m.road.pixels > 0) samples.push(toSignals(m.road));
-      onProgress?.(i + 1, frames);
-    }
-  } finally {
-    await seekTo(video, resumeAt);
-    // Always resume. Reading `paused` before the sweep is unreliable — a clip
-    // that has just been loaded is still paused while play() resolves, so the
-    // check would leave the feed frozen on a still and the whole app would
-    // look dead.
-    void video.play();
-  }
-
-  if (samples.length < 8) {
-    throw new Error(`Only ${samples.length} frames could be analysed — check the ROI is on the track surface.`);
-  }
-  return anchorsFrom(samples);
-}
-
-/**
- * Rolling variant for feeds that cannot be seeked — a webcam, or a stream.
- * Watches for a fixed span of wall-clock time and calibrates on what it saw.
- */
-export async function autoCalibrateLive(
-  engine: CvEngine,
-  seconds = 20,
-  onProgress?: Progress,
-): Promise<AutoCalReport> {
-  const samples: Signals[] = [];
-  const total = seconds * 4;
-  for (let i = 0; i < total; i++) {
-    const m = engine.probe();
-    if (m && m.road.pixels > 0) samples.push(toSignals(m.road));
-    onProgress?.(i + 1, total);
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  if (samples.length < 8) throw new Error('Not enough frames captured.');
-  return anchorsFrom(samples);
-}
-
-/**
  * Minimum samples before anchors mean anything at all.
  *
  * Four frames spread over a second. Below that a single passing shadow is the
@@ -375,8 +337,23 @@ export async function autoCalibrateLive(
  */
 const PROVISIONAL_MIN = 4;
 
-/** Samples at which the anchors stop moving materially — a full watch. */
+/** Samples at which the anchors stop moving materially. */
 const SETTLED_AT = 60;
+
+/** Cadence between republished anchor sets while still converging (~2 s). */
+const PUBLISH_EVERY = 8;
+
+/**
+ * Cadence after settling (~8 s). The anchors are already good; an index that
+ * twitches every two seconds invites doubt without adding information.
+ */
+const SETTLED_REPUBLISH = 32;
+
+/** Surface samples required before tracer thresholds are trusted and applied. */
+const TRACER_MIN = 12;
+
+/** Poll interval — what the live pipeline is already producing, sampled. */
+const SAMPLE_MS = 250;
 
 export type LiveCalStage = 'warming' | 'provisional' | 'settling' | 'settled';
 
@@ -384,58 +361,67 @@ export interface LiveCalUpdate {
   stage: LiveCalStage;
   report: AutoCalReport;
   samples: number;
-  /** 0..1 — how much of the full watch has been completed. */
+  /** 0..1 — how close the watch is to settled. */
   progress: number;
   note: string;
 }
 
 /**
- * Progressive calibration for a live feed.
+ * Real-time calibration for any feed — clip or live.
  *
- * The blocking version watched for twenty seconds and returned nothing until it
- * was finished. On a clip that is a reasonable trade, because the clip is not
- * going anywhere. On a live feed it is the wrong trade entirely: those twenty
- * seconds are twenty seconds of a race happening with a blank readout, and the
- * reason someone pointed a camera at the track was to be told what it is doing
- * *now*.
+ * This replaces both earlier paths. The clip path paused playback and
+ * seek-scanned forty sampled frames, costing a frozen readout on every upload;
+ * the live path watched a fixed twenty-second window and then stopped. Both
+ * are now the same thing: the footage simply plays, this samples what the
+ * pipeline already produces, usable anchors are published as soon as they are
+ * worth anything, and refinement continues for as long as the feed runs.
  *
- * So the anchors are published as soon as they are worth anything and refined
- * in place afterwards. A reading from second two is genuinely less certain than
- * one from second twenty, and the stage says which it is rather than presenting
- * both with the same confidence — that distinction is the honest part, and it
- * is what makes publishing early defensible instead of just faster.
+ * A reading from second two is genuinely less certain than one from second
+ * twenty, and the stage says which it is rather than presenting both with the
+ * same confidence — that distinction is the honest part, and it is what makes
+ * publishing early defensible instead of just faster.
  *
- * Nothing here blocks the engine: it samples what the live pipeline is already
- * producing.
+ * Nothing here blocks the engine, seeks, or pauses anything: probe() reads the
+ * current frame without touching session history or smoothing.
+ *
+ * Runs until aborted (a new source replaced this one, or the check moved on).
  */
-export async function autoCalibrateLiveProgressive(
+export async function autoCalibratePlayback(
   engine: CvEngine,
   onUpdate: (u: LiveCalUpdate) => void,
-  opts: { seconds?: number; signal?: { aborted: boolean } } = {},
+  opts: { signal?: { aborted: boolean } } = {},
 ): Promise<AutoCalReport | null> {
-  const seconds = opts.seconds ?? 20;
-  const total = seconds * 4;
-  const samples: Signals[] = [];
+  const signals: Signals[] = [];
+  const surface: SurfaceSample[] = [];
 
   let published: AutoCalReport | null = null;
   let lastPublishAt = 0;
 
-  for (let i = 0; i < total; i++) {
+  for (;;) {
     if (opts.signal?.aborted) break;
 
     const m = engine.probe();
-    if (m && m.road.pixels > 0) samples.push(toSignals(m.road));
+    if (m && m.road.pixels > 0) {
+      signals.push(toSignals(m.road));
+      surface.push({ sat: m.road.sat, luma: m.road.luma });
+    }
 
-    const n = samples.length;
+    const n = signals.length;
     const progress = Math.min(1, n / SETTLED_AT);
 
     // Republish on a schedule rather than every sample: recomputing anchors
-    // 80 times over the watch is wasted work, and an index that shifts under
-    // the reader every 250 ms is unreadable even when each shift is correct.
-    const due = n >= PROVISIONAL_MIN && (published === null || n - lastPublishAt >= 8);
+    // four times a second is wasted work, and an index that shifts under the
+    // reader every 250 ms is unreadable even when each shift is correct.
+    const cadence = n >= SETTLED_AT ? SETTLED_REPUBLISH : PUBLISH_EVERY;
+    const due = n >= PROVISIONAL_MIN && (published === null || n - lastPublishAt >= cadence);
 
     if (due) {
-      published = anchorsFrom(samples);
+      // Thresholds join the bundle once there are enough surface readings to
+      // trust. Applying them changes what the tracer admits, so later samples
+      // are measured against a slightly wider corridor — but the clamps bound
+      // the drift and the measurement converges as the distribution settles.
+      const tracer = surface.length >= TRACER_MIN ? tracerFrom(surface) : undefined;
+      published = { ...anchorsFrom(signals), ...(tracer ? { tracer } : {}) };
       lastPublishAt = n;
 
       const stage: LiveCalStage =
@@ -453,19 +439,22 @@ export async function autoCalibrateLiveProgressive(
               ? `Anchors settling — ${n} frames watched, still refining. Readings are usable; ` +
                 `treat a borderline call as borderline.`
               : `Provisional anchors from ${n} frames. The readout is live, but the scale is ` +
-                `still being established — expect the index to shift as the watch completes.`,
+                `still being established — expect the index to shift as the watch continues.`,
       });
-    } else if (n < PROVISIONAL_MIN) {
+    } else if (n < PROVISIONAL_MIN && (!published || lastPublishAt === 0)) {
       onUpdate({
         stage: 'warming',
         report: published ?? ({} as AutoCalReport),
         samples: n,
         progress,
-        note: 'Warming up — waiting for the first frames of road.',
+        note:
+          n === 0
+            ? 'Warming up — waiting for the first frames of road.'
+            : `Warming up — ${n} road frame${n === 1 ? '' : 's'} so far.`,
       });
     }
 
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, SAMPLE_MS));
   }
 
   return published;

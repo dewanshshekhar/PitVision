@@ -407,5 +407,44 @@ section('A rain-darkened sky cannot be walked into');
     brightTrace ? `yTop ${brightTrace.yTop.toFixed(3)}` : 'refused');
 }
 
+// ── Realistic onboard headcam with front tyres and cockpit ──────────────
+section('Realistic onboard headcam view with wheels and bodywork');
+{
+  const leftAt = (t) => 0.5 - (0.08 + 0.32 * t);
+  const rightAt = (t) => 0.5 + (0.08 + 0.32 * t);
+  const { img } = scene({ leftAt, rightAt, horizon: 0.35 });
+  const data = img.data;
+
+  // Add front wheels (dark rubber) on left and right lower corners
+  for (let y = Math.round(0.55 * H); y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const nx = x / W;
+      const ny = y / H;
+      const i = (y * W + nx * W) * 4;
+      // Left wheel
+      if (nx >= 0.12 && nx <= 0.26 && ny >= 0.55 && ny <= 0.85) {
+        data[i] = 30; data[i + 1] = 30; data[i + 2] = 32;
+      }
+      // Right wheel
+      if (nx >= 0.74 && nx <= 0.88 && ny >= 0.55 && ny <= 0.85) {
+        data[i] = 30; data[i + 1] = 30; data[i + 2] = 32;
+      }
+      // Nosecone in bottom center
+      if (nx >= 0.38 && nx <= 0.62 && ny >= 0.70) {
+        data[i] = 25; data[i + 1] = 95; data[i + 2] = 190; // blue livery
+      }
+    }
+  }
+
+  const headcamTrace = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('the road ahead is traced despite wheels and livery', headcamTrace !== null);
+  if (headcamTrace) {
+    const err = boundaryError(headcamTrace, leftAt, rightAt, 0.35);
+    check('boundaries accurately match the real track', err < 0.045, `mean error ${(err * 100).toFixed(1)}%`);
+    check('corridor stays centered and spans real road width', headcamTrace.meanWidth > 0.20, `meanWidth ${headcamTrace.meanWidth.toFixed(2)}`);
+  }
+}
+
 console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m\n`);
 process.exit(failed === 0 ? 0 : 1);
+

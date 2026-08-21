@@ -19,8 +19,9 @@ npm run dev
 Open <http://localhost:5173> and **drop your track footage onto the video panel**. That is
 the whole setup:
 
-1. The clip loads and the **pre-race check** runs automatically.
-2. It scans the clip end to end and calibrates itself against *that footage*.
+1. The clip loads and the **pre-race check** runs automatically — playback never pauses.
+2. As the footage plays it calibrates itself against *that footage*, usable within seconds
+   and refined for its whole length.
 3. Detection runs continuously, and pings appear the moment the surface changes.
 
 There is a generated scene available if you want to poke at it before footage exists, but
@@ -131,7 +132,7 @@ when footage loads, and on demand from the **Pre-race check** panel:
 |---|---|
 | Feed decodes | Resolution and duration are real |
 | ROI on track surface | Enough pixels land in each band for divergence to mean anything |
-| Calibration sweep | 40 frames sampled across the clip; anchors derived from *this* footage |
+| Real-time calibration | Anchors and tracer thresholds derived from *this* footage while it plays — usable in seconds, refined throughout |
 | Condition range | The clip actually spans dry to wet, so the index is anchored at both ends |
 | Buffers warmed | Every array the hot loop touches is allocated and touched |
 | Throughput | Measured ms/frame on *this* machine with *this* clip, against the 12 Hz budget |
@@ -143,7 +144,8 @@ up at the wrong moment.
 
 ## Calibration — and the trap it avoids
 
-Auto-calibration samples 40 frames spread across the clip and needs no input from you.
+Auto-calibration watches the footage as it plays — any feed, clip or live — needs no
+input from you, and keeps refining for the whole session.
 
 The obvious implementation is wrong, and wrong in a way that's hard to catch: map the
 clip's 10th percentile to 0 and its 90th to 100. A purely relative scale **always** yields a
@@ -340,18 +342,24 @@ measures the anchors — and the tracer's own thresholds, which were chosen agai
 generated scenes rather than real tarmac — from your footage, offline, so the app
 starts already anchored. See [ml/README.md](ml/README.md).
 
+The browser anchors itself from a live feed in about fifteen seconds, which is
+fine for a practice session and not fine for the moment the lights go out. This
+measures the anchors — and the tracer's own thresholds, which were chosen against
+generated scenes rather than real tarmac — from your footage, offline. Copy the
+output to `public/calibration.json` and the app imports it at startup as its
+pre-warm seed, then refines from there on whatever loads. See
+[ml/README.md](ml/README.md).
+
 ---
 
 ## Live feeds start immediately
 
-A clip can be scanned end to end because the whole of it is available now. A live feed
-cannot — there is no "end" yet — so it is watched instead.
+Every feed calibrates the same way now: the footage plays and a progressive watch
+samples what the pipeline already produces. There is no separate clip scan, and
+nothing ever pauses or seeks.
 
-That watch used to block for twenty seconds and return nothing until it finished, which on
-a live feed means twenty seconds of a race happening behind a blank readout. The reason
-someone pointed a camera at the track was to be told what it is doing *now*.
-
-It now publishes anchors as soon as they are worth anything and refines them in place:
+It publishes anchors as soon as they are worth anything and refines them for as long
+as the feed runs:
 
 | Stage | When | What the readout means |
 |---|---|---|

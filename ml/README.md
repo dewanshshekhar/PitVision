@@ -85,7 +85,8 @@ real tarmac is not.
 from a live feed in about fifteen seconds. That is fine for a practice session
 and not fine for the moment the lights go out. Run this the day before on last
 year's footage, or on this morning's installation lap, and the app starts
-already anchored.
+already anchored: copy `calibration.json` into `public/` and it is imported at
+startup as the pre-warm seed, then refined live once real footage loads.
 
 The two ends of the scale are established differently, and the asymmetry is
 deliberate. Mapping the clip's own percentiles to 0 and 100 is the obvious
