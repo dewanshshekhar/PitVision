@@ -296,8 +296,8 @@ more reliably than any heuristic can. That is available as an optional sidecar:
 
 | | Where it runs | Cost | Needs |
 |---|---|---|---|
-| **Segmentation** | Python sidecar | ~30–80 ms, asked 2–3×/s | a model file |
-| **Geometric tracing** | browser | 0.42 ms, 4×/s | nothing |
+| **Segmentation** | Python sidecar | ~30–80 ms, up to 8×/s | a model file |
+| **Geometric tracing** | browser | 0.42 ms, up to 16×/s | nothing |
 | **Hand-placed ROI** | browser | free | someone to aim it |
 
 Each falls back to the next, so nothing can leave the detector without a region.
@@ -318,10 +318,10 @@ with setup, calibration and fine-tuning, in **[ml/README.md](ml/README.md)**.
 | 640×360 | 0.95 ms | 1.17 ms |
 | 960×540 | 2.01 ms | 2.21 ms |
 
-Re-traced four times a second rather than every frame — a road does not move between two
-frames 40 ms apart — which comes to **0.064 ms per frame amortised** at 25 fps against a
-100 ms budget. The wetness readout still updates every frame; only the shape it is measured
-through holds still between traces.
+Re-traced at most every 60 ms rather than every video frame, which comes to about
+**0.28 ms per frame amortised** at 25 fps against a 100 ms budget. Neural
+segmentation is a semantic keyframe; the live trace propagates its per-row
+motion between responses so it does not trail the road through a turn.
 
 `npm run test:lane` runs the tracer headlessly against synthetic roads with known geometry:
 that it follows a curve rather than fitting a box, that it refuses when there is no road,

@@ -14,7 +14,7 @@
  *   node scripts/lane-test.mjs
  */
 
-import { traceLane, DEFAULT_TRACE_OPTIONS, ROWS } from '../src/cv/lane.ts';
+import { traceLane, LaneTracker, DEFAULT_TRACE_OPTIONS, ROWS } from '../src/cv/lane.ts';
 
 const W = 384;
 const H = 216;
@@ -156,6 +156,54 @@ section('A road that curves — what a fixed trapezoid cannot follow');
     boxed = (maxR - minL) * ROWS;
     check('the trace is materially tighter than its bounding box', traced < boxed * 0.85,
       `traced ${(traced / ROWS).toFixed(3)} vs box ${(boxed / ROWS).toFixed(3)} per row`);
+  }
+}
+
+section('A tight changing-radius turn stays accurate');
+{
+  // A progressive corner: little movement at turn-in, then rapidly increasing
+  // curvature. This is deliberately harder than the constant-radius fixture.
+  const centre = (t) => 0.5 + 0.18 * t ** 4;
+  const half = (t) => 0.07 + 0.22 * t;
+  const leftAt = (t) => centre(t) - half(t);
+  const rightAt = (t) => centre(t) + half(t);
+  const { trace } = scene({ leftAt, rightAt });
+
+  check('the progressive turn is found', trace !== null);
+  if (trace) {
+    const err = boundaryError(trace, leftAt, rightAt);
+    check('row-wise boundaries preserve the changing radius', err < 0.012,
+      `mean error ${(err * 100).toFixed(2)}%`);
+  }
+}
+
+section('Temporal tracking follows steering instead of trailing it');
+{
+  const tracker = new LaneTracker();
+  let tracked = null;
+  let fresh = null;
+  let now = 100;
+
+  // Six real retraces across a quick turn-in. Comparing with the unsmoothed
+  // result isolates temporal lag from the accuracy of the per-frame detector.
+  for (const turn of [0, 0.035, 0.07, 0.105, 0.14, 0.175]) {
+    const centre = (t) => 0.5 + turn * (0.25 + 0.75 * t * t);
+    const half = (t) => 0.07 + 0.22 * t;
+    const leftAt = (t) => centre(t) - half(t);
+    const rightAt = (t) => centre(t) + half(t);
+    const built = scene({ leftAt, rightAt });
+    fresh = built.trace;
+    tracked = tracker.update(built.img, now);
+    now += 61;
+  }
+
+  check('the final turning frame is detected', tracked !== null && fresh !== null);
+  if (tracked && fresh) {
+    const i = Math.floor(ROWS * 0.72);
+    const trackedCentre = (tracked.left[i] + tracked.right[i]) / 2;
+    const freshCentre = (fresh.left[i] + fresh.right[i]) / 2;
+    check('tracking lag stays under 3.5% of frame width', Math.abs(trackedCentre - freshCentre) < 0.035,
+      `lag ${(Math.abs(trackedCentre - freshCentre) * 100).toFixed(1)}%`);
   }
 }
 

@@ -6,6 +6,40 @@ was verified, so a future reader can tell a decision from an accident.
 
 ---
 
+## 2026-08-22 — Turn-aware temporal road mapping
+
+**Problem.** Neural segmentation was requested every 400 ms and the last result
+always overrode the fresher geometric trace. Including inference and transport,
+the displayed corridor could describe a frame roughly half a second old. The
+geometric tracker then added fixed-alpha smoothing (`0.22`), so both paths
+visibly trailed the road during turn-in.
+
+**Research.** [RVLD](https://github.com/dongkwonjin/RVLD) carries lane state
+recursively between video frames instead of holding isolated detections.
+[UFLD-v2](https://github.com/cfzd/Ultra-Fast-Lane-Detection-v2) publishes
+CurveLanes-trained weights and represents lanes through row anchors, while
+[HybridNets](https://github.com/datvuthanh/HybridNets) confirms that drivable
+area and lane heads can share one real-time model. Replacing the installed
+model would add deployment and race-track training work; the useful immediate
+idea is temporal propagation.
+
+**Change.** Segmentation now produces semantic keyframes at a 120 ms cadence.
+Each request records the geometric trace from the captured frame; until the
+next response, its left and right boundaries are propagated row-by-row using
+the current trace. Keyframes older than 450 ms expire to the live tracer.
+Geometric smoothing is motion-adaptive: quiet on a straight and faster as the
+measured centre/width moves.
+
+**Verification.** Added a rapid turn sequence (old lag: 5.4% of frame width;
+new bound: <3.5%), delayed-keyframe motion compensation, prompt refresh,
+expiry, and changing-radius curve regressions.
+
+**Files.** `src/cv/segclient.ts` · `src/cv/lane.ts` · `src/cv/engine.ts` ·
+`scripts/segclient-test.mjs` · `scripts/lane-test.mjs` · `package.json` ·
+`README.md` · `ml/README.md`
+
+---
+
 ## 2026-08-21 — Real-time calibration replaces the 40-frame seek-scan
 
 ### 1. Calibration now runs on the footage as it plays, for its whole length
@@ -128,8 +162,8 @@ unrelated to these changes).
 1. **Stand up the segmentation path end to end** before judging edge quality:
    `.venv` → `fetch_models.py --model yolopv2` → sidecar →
    `PITVISION_SEGMENTER_URL`; install `onnxruntime-gpu` (RTX 4060).
-   `engine.ts` priority chain (manual → segmentation → traced → manual) and
-   `segclient` (400 ms interval, give-up after 4 misses) already support it.
+   `engine.ts` priority chain (manual → propagated segmentation → traced → manual)
+   and `segclient` (120 ms keyframes, give-up after 4 misses) already support it.
 2. **Fine-tune only if needed**: if run-off bleeding appears at edges,
    `prepare_dataset.py` → review → `finetune.py` (0.5 M-param U-Net).
 3. Deprioritised: SUB_BANDS ratio tuning, Opus→HF verification swap (stay on

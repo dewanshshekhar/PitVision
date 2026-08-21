@@ -66,8 +66,8 @@ export class CvEngine {
    * Finds the road and follows it.
    *
    * Rate-limited internally, so this costs a fraction of a millisecond per
-   * frame amortised — the corridor is re-derived four times a second and reused
-   * in between, because a road does not move between two frames 40 ms apart.
+   * frame amortised. It supplies the current-frame motion used to propagate
+   * neural keyframes between sidecar responses.
    */
   readonly lane = new LaneTracker();
 
@@ -316,8 +316,8 @@ export class CvEngine {
       corridor = corridorFromRoad(this.cal.road);
       this.lastCorridorSource = 'manual';
     } else {
-      const segmented = this.segmenter.update(() => this.snapshot(640, 0.7));
       const traced = this.lane.update(img);
+      const segmented = this.segmenter.update(() => this.snapshot(640, 0.7), traced);
       if (segmented) {
         corridor = corridorFromTrace(segmented);
         this.lastCorridorSource = 'segmentation';
