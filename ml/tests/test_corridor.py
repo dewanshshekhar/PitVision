@@ -110,11 +110,9 @@ def boundary_error(corr, bend: float = 0.0, skip: int = 4) -> float:
     total, n = 0.0, 0
     for i in range(skip, CFG.rows - skip):
         l, r = truth_at(corr, i, bend)
-        # The corridor is deliberately inset from the limits, so compare against
-        # the truth inset by the same amount rather than against the raw edge.
-        span = r - l
-        inset = span * CFG.edge_inset
-        total += abs(corr.left[i] - (l + inset)) + abs(corr.right[i] - (r - inset))
+        # The sidecar emits raw track limits. The browser applies the safety
+        # inset once, in the same place it does for the geometric tracer.
+        total += abs(corr.left[i] - l) + abs(corr.right[i] - r)
         n += 2
     return total / max(1, n)
 
@@ -156,6 +154,26 @@ if corr:
           f"mean error {boundary_error(corr) * 100:.1f}%")
     check("the corridor still spans the full depth", corr.y_bot - corr.y_top > 0.55,
           f"span {corr.y_bot - corr.y_top:.2f}")
+
+# ── An onboard camera hood reaches the bottom ─────────────────────────
+section("A camera hood cannot pull the corridor onto one side of the car")
+road, _ = build()
+for y in range(int(0.56 * H), H):
+    t = (y / H - 0.56) / (1 - 0.56)
+    half = 0.035 + 0.16 * t
+    road[y, int((0.5 - half) * W) : int((0.5 + half) * W)] = 0.02
+
+corr = corridor_from_masks(road, None, CFG)
+check("a corridor is still produced ahead of the hood", corr is not None)
+if corr:
+    near_centre = (corr.left[-1] + corr.right[-1]) / 2
+    check("the mapped road stays centred, not in a wheel/nose gap",
+          abs(near_centre - 0.5) < 0.08, f"centre {near_centre:.3f}")
+    check("the measurable region stops before the hood",
+          corr.y_bot < 0.62, f"yBot {corr.y_bot:.3f}")
+    check("the open track remains full-width at the near end",
+          corr.right[-1] - corr.left[-1] > 0.30,
+          f"width {corr.right[-1] - corr.left[-1]:.3f}")
 
 # ── A second patch of asphalt ──────────────────────────────────────────
 section("Asphalt across the infield is not the road we are on")

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from make_fixture_model import build as build_fixture
 from pitvision_ml.config import CorridorConfig, ModelSpec
 from pitvision_ml.corridor import corridor_from_masks
-from pitvision_ml.segmenter import RoadSegmenter, letterbox, unletterbox
+from pitvision_ml.segmenter import RoadSegmenter, _adapt_yolop, letterbox, unletterbox
 
 _passed = 0
 _failed = 0
@@ -124,6 +124,20 @@ with tempfile.TemporaryDirectory() as tmp:
           road_cov > lane_cov * 3, f"road {road_cov:.3f} vs lane {lane_cov:.3f}")
     check("the road mask is a plausible fraction of the frame",
           0.10 < road_cov < 0.75, f"{road_cov:.3f}")
+
+    # A real YOLOPv2 TorchScript export flattens several large detection maps
+    # ahead of the road/lane maps. They must not be mistaken for segmentation.
+    det = np.zeros((1, 3, 48, 80, 85), dtype=np.float32)
+    anchor = np.zeros((1, 3, 1, 1, 2), dtype=np.float32)
+    road_logits = np.full((1, 2, 48, 80), -4.0, dtype=np.float32)
+    lane_logits = np.full((1, 2, 48, 80), -4.0, dtype=np.float32)
+    road_logits[:, 1, 20:, 10:70] = 4.0
+    lane_logits[:, 1, 20:, (12, 67)] = 4.0
+    mapped_road, mapped_lane = _adapt_yolop([det, anchor, road_logits, lane_logits])
+    check("large detection tensors are ignored when selecting mask heads",
+          mapped_road.shape == (48, 80) and mapped_lane is not None and mapped_lane.shape == (48, 80))
+    check("the broader map is selected as road",
+          float((mapped_road > 0.5).mean()) > float((mapped_lane > 0.5).mean()) * 5)
 
     # ── The masks land on the actual road ──────────────────────────────
     section("The mask lands where the tarmac is")
