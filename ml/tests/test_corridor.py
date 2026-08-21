@@ -175,6 +175,22 @@ if corr:
           corr.right[-1] - corr.left[-1] > 0.30,
           f"width {corr.right[-1] - corr.left[-1]:.3f}")
 
+# Some segmentation heads make the opposite error: they call the hood road.
+# The service has the source frame, so it can still stop at coloured bodywork.
+section("A false road mask cannot paint over the car body")
+road, _ = build()
+frame = np.zeros((H, W, 3), dtype=np.uint8)
+frame[:] = (48, 104, 58)  # grass in BGR
+frame[road > CFG.road_threshold] = (118, 118, 118)
+hood_top = int(0.64 * H)
+frame[hood_top:, int(0.36 * W) : int(0.64 * W)] = (190, 90, 20)  # blue livery in BGR
+
+corr = corridor_from_masks(road, None, CFG, frame)
+check("a corridor is still produced ahead of the car", corr is not None)
+if corr:
+    check("the segmented corridor stops before coloured bodywork",
+          corr.y_bot < 0.67, f"yBot {corr.y_bot:.3f}")
+
 # ── A second patch of asphalt ──────────────────────────────────────────
 section("Asphalt across the infield is not the road we are on")
 road, _ = build(extra_blob=True)
@@ -225,6 +241,11 @@ sliver = np.zeros((H, W), dtype=np.float32)
 sliver[int(0.5 * H) :, int(0.49 * W) : int(0.51 * W)] = 0.99
 check("a sliver too narrow to measure returns nothing",
       corridor_from_masks(sliver, None, CFG) is None)
+
+side_patch = np.zeros((H, W), dtype=np.float32)
+side_patch[int(0.34 * H) :, int(0.05 * W) : int(0.30 * W)] = 0.99
+check("a one-sided patch cannot become the road",
+      corridor_from_masks(side_patch, None, CFG) is None)
 
 # ── The contract the browser depends on ────────────────────────────────
 section("The wire shape matches what the browser consumes")

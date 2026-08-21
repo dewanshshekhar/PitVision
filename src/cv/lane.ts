@@ -274,6 +274,11 @@ function findSeed(img: ImageData, opts: TraceOptions, priorCenterX = 0.5): Seed 
       const spansCenter = lNorm <= 0.48 && rNorm >= 0.52;
       const spansBothSides = lNorm <= 0.38 && rNorm >= 0.62;
 
+      // A wheel-side gap or a strip of grey verge can score well on colour,
+      // width and depth. It is still not the road in front of the camera.
+      // This is a validity condition, not a preference in the score.
+      if (!spansCenter) continue;
+
       const greyness = 1 - meanS / opts.maxSat;
       const flatness = 1 / (1 + varL / 260);
 
@@ -282,7 +287,7 @@ function findSeed(img: ImageData, opts: TraceOptions, priorCenterX = 0.5): Seed 
       const spanScore = Math.min(1, spanNorm / 0.50);
       const centerDist = Math.abs(cx - priorCenterX);
       const centerScore = 1 - Math.min(1, centerDist / 0.35);
-      const fullRoadBonus = spansBothSides ? 0.35 : spansCenter ? 0.15 : -0.30;
+      const fullRoadBonus = spansBothSides ? 0.35 : 0.15;
 
       const score =
         greyness * 0.25 +

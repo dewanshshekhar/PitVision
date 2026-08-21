@@ -172,6 +172,26 @@ section('It refuses rather than inventing a road');
   check('a field of grass traces nothing', trace === null, trace ? `got width ${trace.meanWidth.toFixed(2)}` : '');
 }
 {
+  // A grey strip beside the camera can be tarmac run-off or the visible gap
+  // beside a nosecone. It does not cross the forward axis, so it is not a road
+  // corridor and must not become one just because its colour looks plausible.
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      if (y / H >= 0.34 && x / W >= 0.05 && x / W <= 0.30) {
+        data[i] = 112; data[i + 1] = 112; data[i + 2] = 114;
+      } else {
+        data[i] = 58; data[i + 1] = 104; data[i + 2] = 44;
+      }
+      data[i + 3] = 255;
+    }
+  }
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+  check('a one-sided grey patch cannot become the mapped road', trace === null,
+    trace ? `center ${((trace.left[24] + trace.right[24]) / 2).toFixed(2)}` : '');
+}
+{
   // Pure sky.
   const data = new Uint8ClampedArray(W * H * 4);
   for (let i = 0; i < W * H; i++) {
@@ -442,9 +462,13 @@ section('Realistic onboard headcam view with wheels and bodywork');
     const err = boundaryError(headcamTrace, leftAt, rightAt, 0.35);
     check('boundaries accurately match the real track', err < 0.045, `mean error ${(err * 100).toFixed(1)}%`);
     check('corridor stays centered and spans real road width', headcamTrace.meanWidth > 0.20, `meanWidth ${headcamTrace.meanWidth.toFixed(2)}`);
+    const nearCenter = (headcamTrace.left[ROWS - 1] + headcamTrace.right[ROWS - 1]) / 2;
+    check('the map does not jump into either wheel-side gap', Math.abs(nearCenter - 0.5) < 0.08,
+      `near center ${nearCenter.toFixed(2)}`);
+    check('the map stops before the nosecone', headcamTrace.yBot < 0.72,
+      `yBot ${headcamTrace.yBot.toFixed(3)}`);
   }
 }
 
 console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m\n`);
 process.exit(failed === 0 ? 0 : 1);
-

@@ -3,12 +3,7 @@ import type { Calibration } from '../cv/calibration';
 import { normalise } from '../util/math';
 import { bandOutline, roadCorners, SUB_BANDS, corridorFromRoad, type Corridor, type RoadGeometry } from '../cv/rois';
 import { coverTransform, fitCanvas } from '../util/dom';
-
-const BAND_STYLE: Record<string, { stroke: string; label: string }> = {
-  line: { stroke: 'rgba(70,224,138,0.95)', label: 'RACING LINE' },
-  left: { stroke: 'rgba(56,189,248,0.85)', label: 'EDGE L' },
-  right: { stroke: 'rgba(56,189,248,0.85)', label: 'EDGE R' },
-};
+import { BAND_STYLE } from './overlay-bands';
 
 /**
  * Draws the ROI geometry and a wetness heatmap directly onto the feed.
@@ -217,15 +212,10 @@ export class Overlay {
       ctx.closePath();
     };
 
-    // Track limits — where the trace says the tarmac stops.
-    ctx.save();
-    ctx.strokeStyle = corridor.traced ? 'rgba(70,224,138,0.5)' : 'rgba(238,242,247,0.28)';
-    ctx.lineWidth = corridor.traced ? 1.4 : 1;
-    ctx.setLineDash([5, 5]);
-    path(bandOutline(corridor, SUB_BANDS[0], 1, 1));
-    ctx.stroke();
-    ctx.restore();
-
+    // The full detected road is green. The two blue regions are the edge
+    // samples inside it. The centre racing-line band is still measured for
+    // dry-line divergence, but drawing it as the green region made the mapped
+    // road look only one-third as wide as it actually was.
     for (const band of SUB_BANDS) {
       const style = BAND_STYLE[band.name];
       if (!style) continue;
@@ -233,9 +223,11 @@ export class Overlay {
       if (pts.length < 4) continue;
 
       ctx.save();
+      ctx.fillStyle = style.fill;
       ctx.strokeStyle = style.stroke;
       ctx.lineWidth = 1.6;
       path(pts);
+      ctx.fill();
       ctx.stroke();
 
       // Label low in the band, not at the horizon: up there the three bands
