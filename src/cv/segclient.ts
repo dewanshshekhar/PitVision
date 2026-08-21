@@ -1,5 +1,5 @@
 import type { LaneTrace } from './lane';
-import { ROWS } from './lane';
+import { ROWS, sampleAt } from './lane';
 
 /**
  * Client for the road-segmentation sidecar.
@@ -10,10 +10,9 @@ import { ROWS } from './lane';
  * every frame: a CPU inference is tens of milliseconds against a 100 ms
  * end-to-end budget.
  *
- * So it is used exactly as the geometric tracer is: asked a few times a second,
- * reused in between. A road does not move between two frames 40 ms apart. The
- * wetness readout still updates every frame; only the shape it is measured
- * through holds still between calls.
+ * The network supplies semantic keyframes while the geometric tracer carries
+ * their motion between responses. This avoids both request pile-ups and the
+ * visibly stale overlay produced by holding one mask through a fast turn.
  *
  * Everything here is optional and every failure is silent. Most installations
  * will never run a sidecar, and for them this class does nothing at all — the
@@ -22,8 +21,11 @@ import { ROWS } from './lane';
  * be a worse detector than the one it replaced.
  */
 
-/** How often the sidecar is asked. Deliberately slower than the geometric tracer. */
-const INTERVAL_MS = 400;
+/** Semantic keyframe cadence. In-flight gating prevents request pile-ups. */
+export const SEGMENT_INTERVAL_MS = 120;
+
+/** Never measure through a neural result captured before the current turn. */
+export const MAX_SEGMENT_AGE_MS = 450;
 
 /** After this many consecutive failures, stop asking until something changes. */
 const GIVE_UP_AFTER = 4;
@@ -55,6 +57,8 @@ export class SegmentationClient {
   private lastAt = 0;
   private failures = 0;
   private current: LaneTrace | null = null;
+  /** Browser trace from the exact frame sent for the current neural result. */
+  private anchor: LaneTrace | null = null;
   private status: SegStatus = {
     state: 'off',
     latencyMs: 0,
@@ -75,6 +79,7 @@ export class SegmentationClient {
 
   reset() {
     this.current = null;
+    this.anchor = null;
     this.failures = 0;
     this.lastAt = 0;
     this.status = { state: this.enabled ? 'probing' : 'off', latencyMs: 0, limitsFrom: null, message: 'Reset' };
@@ -122,23 +127,33 @@ export class SegmentationClient {
    * Offer a frame. Returns immediately with whatever corridor is current.
    *
    * Fire and forget: the request is not awaited, so this never blocks the
-   * analysis pass. The corridor it returns is the one from the *previous*
-   * successful call, which is the whole design — a corridor a few hundred
-   * milliseconds old still describes the road.
+   * analysis pass. A previous semantic result is returned only after its
+   * per-row motion has been updated from the current geometric trace.
    */
-  update(snapshot: () => string | null, now = performance.now()): LaneTrace | null {
-    if (!this.enabled || this.inFlight) return this.current;
-    if (now - this.lastAt < INTERVAL_MS) return this.current;
-    this.lastAt = now;
+  update(
+    snapshot: () => string | null,
+    guide: LaneTrace | null = null,
+    now = performance.now(),
+  ): LaneTrace | null {
+    const visible = this.visibleTrace(guide, now);
+    if (!this.enabled || this.inFlight) return visible;
+    if (now - this.lastAt < SEGMENT_INTERVAL_MS) return visible;
 
     const image = snapshot();
-    if (!image) return this.current;
+    if (!image) return visible;
+    this.lastAt = now;
 
-    void this.request(image);
-    return this.current;
+    void this.request(image, now, guide);
+    return visible;
   }
 
-  private async request(image: string) {
+  private visibleTrace(guide: LaneTrace | null, now: number): LaneTrace | null {
+    if (!this.current || now - this.current.at > MAX_SEGMENT_AGE_MS) return null;
+    if (!guide || !this.anchor) return this.current;
+    return propagate(this.current, this.anchor, guide, now);
+  }
+
+  private async request(image: string, capturedAt: number, anchor: LaneTrace | null) {
     this.inFlight = true;
     const started = performance.now();
     try {
@@ -156,7 +171,10 @@ export class SegmentationClient {
         // there is no road in this frame, which is a real answer. Only drop the
         // corridor once several frames in a row have said so, or a single
         // frame of spray would blank the region.
-        if (this.failures >= GIVE_UP_AFTER) this.current = null;
+        if (this.failures >= GIVE_UP_AFTER) {
+          this.current = null;
+          this.anchor = null;
+        }
         this.status = {
           state: body.reason?.includes('unreachable') || body.reason?.includes('no segmenter')
             ? 'unavailable'
@@ -169,7 +187,8 @@ export class SegmentationClient {
       }
 
       this.failures = 0;
-      this.current = toTrace(body.corridor);
+      this.current = toTrace(body.corridor, capturedAt);
+      this.anchor = this.current ? anchor : null;
       this.status = {
         state: 'live',
         latencyMs,
@@ -182,6 +201,7 @@ export class SegmentationClient {
       this.failures++;
       if (this.failures >= GIVE_UP_AFTER) {
         this.current = null;
+        this.anchor = null;
         this.enabled = false;
         this.status = { state: 'unavailable', latencyMs: 0, limitsFrom: null, message: 'Segmenter stopped responding' };
       }
@@ -199,7 +219,7 @@ export class SegmentationClient {
  * Python side emit exactly this shape. A resampling step here would be a place
  * for the two road sources to quietly disagree about where the road is.
  */
-function toTrace(c: WireCorridor): LaneTrace | null {
+function toTrace(c: WireCorridor, capturedAt: number): LaneTrace | null {
   if (!Array.isArray(c.left) || c.left.length !== ROWS || c.right.length !== ROWS) return null;
   return {
     yTop: c.yTop,
@@ -214,6 +234,42 @@ function toTrace(c: WireCorridor): LaneTrace | null {
     // a different measurement. Nothing downstream reads them for a traced lane.
     surfaceSat: 0,
     surfaceLuma: 0,
-    at: performance.now(),
+    // This is when the image was captured, not when inference finished. Using
+    // response time made a stale corridor look fresh during a fast turn.
+    at: capturedAt,
+  };
+}
+
+/**
+ * Carry a semantic keyframe forward with the live geometric trace.
+ *
+ * RVLD-style video tracking recursively propagates lane state rather than
+ * holding the last neural frame. We already have a cheap trace on every
+ * analysed frame, so its per-row motion is the propagation signal: semantic
+ * boundaries come from the network, current motion comes from the browser.
+ */
+function propagate(keyframe: LaneTrace, from: LaneTrace, to: LaneTrace, now: number): LaneTrace {
+  const left = new Float32Array(ROWS);
+  const right = new Float32Array(ROWS);
+  let widthSum = 0;
+
+  for (let i = 0; i < ROWS; i++) {
+    const y = keyframe.yTop + ((keyframe.yBot - keyframe.yTop) * i) / (ROWS - 1);
+    const [fromL, fromR] = sampleAt(from, y);
+    const [toL, toR] = sampleAt(to, y);
+    let l = Math.max(0, Math.min(1, keyframe.left[i] + Math.max(-0.2, Math.min(0.2, toL - fromL))));
+    let r = Math.max(0, Math.min(1, keyframe.right[i] + Math.max(-0.2, Math.min(0.2, toR - fromR))));
+    if (r < l) [l, r] = [r, l];
+    left[i] = l;
+    right[i] = r;
+    widthSum += r - l;
+  }
+
+  return {
+    ...keyframe,
+    left,
+    right,
+    meanWidth: widthSum / ROWS,
+    at: now,
   };
 }

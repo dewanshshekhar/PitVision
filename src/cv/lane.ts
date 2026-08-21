@@ -589,8 +589,9 @@ export function traceLane(
  */
 const RETRACE_MS = 60;
 
-/** Blend factor toward a new trace for silky-smooth tracking without jumpiness. */
-const TRACK_ALPHA = 0.22;
+/** Base correction is quiet on a straight; real motion raises it immediately. */
+const TRACK_ALPHA_MIN = 0.30;
+const TRACK_ALPHA_MAX = 0.82;
 
 /** Below this the trace is not trusted enough to measure through. */
 const MIN_CONFIDENCE = 0.50;
@@ -687,7 +688,24 @@ export class LaneTracker {
     }
 
     this.misses = 0;
-    this.current = this.current ? blend(this.current, fresh, TRACK_ALPHA) : fresh;
+    if (!this.current) {
+      this.current = fresh;
+    } else {
+      const i = Math.floor(ROWS / 2);
+      const oldCenter = (this.current.left[i] + this.current.right[i]) / 2;
+      const newCenter = (fresh.left[i] + fresh.right[i]) / 2;
+      const centerMotion = Math.abs(newCenter - oldCenter);
+      const widthMotion = Math.abs(fresh.meanWidth / Math.max(1e-4, this.current.meanWidth) - 1);
+      // Fixed low-alpha smoothing visibly trails a corner. Scale the correction
+      // with measured motion: stable straights stay smooth, steering responds
+      // in the same frame instead of several retraces later.
+      const alpha = clamp(
+        TRACK_ALPHA_MIN + centerMotion * 4.0 + widthMotion * 0.35,
+        TRACK_ALPHA_MIN,
+        TRACK_ALPHA_MAX,
+      );
+      this.current = blend(this.current, fresh, alpha);
+    }
     return this.current;
   }
 }

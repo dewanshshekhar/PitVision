@@ -11,8 +11,8 @@ detector without a region to measure:
 
 | | Where it runs | Cost | Needs |
 |---|---|---|---|
-| **Segmentation** | Python sidecar | ~30–80 ms, asked 2–3×/s | a model file |
-| **Geometric tracing** | browser | 0.42 ms, 4×/s | nothing |
+| **Segmentation** | Python sidecar | ~30–80 ms, up to 8×/s | a model file |
+| **Geometric tracing** | browser | 0.42 ms, up to 16×/s | nothing |
 | **Hand-placed ROI** | browser | free | someone to aim it |
 
 ---
