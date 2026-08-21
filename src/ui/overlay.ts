@@ -3,7 +3,7 @@ import type { Calibration } from '../cv/calibration';
 import { normalise } from '../util/math';
 import { bandOutline, roadCorners, SUB_BANDS, corridorFromRoad, type Corridor, type RoadGeometry } from '../cv/rois';
 import { coverTransform, fitCanvas } from '../util/dom';
-import { BAND_STYLE } from './overlay-bands';
+import { BAND_FILL_ORDER, BAND_STROKE_ORDER, BAND_STYLE } from './overlay-bands';
 
 /**
  * Draws the ROI geometry and a wetness heatmap directly onto the feed.
@@ -216,7 +216,13 @@ export class Overlay {
     // samples inside it. The centre racing-line band is still measured for
     // dry-line divergence, but drawing it as the green region made the mapped
     // road look only one-third as wide as it actually was.
-    for (const band of SUB_BANDS) {
+    const visible = Object.fromEntries(SUB_BANDS.map((band) => [band.name, band]));
+
+    // Fill first. Drawing each fill+stroke together let the blue edge regions
+    // overwrite the green road boundary because they share the outer limits.
+    for (const name of BAND_FILL_ORDER) {
+      const band = visible[name];
+      if (!band) continue;
       const style = BAND_STYLE[band.name];
       if (!style) continue;
       const pts = bandOutline(corridor, band, 1, 1);
@@ -224,10 +230,25 @@ export class Overlay {
 
       ctx.save();
       ctx.fillStyle = style.fill;
-      ctx.strokeStyle = style.stroke;
-      ctx.lineWidth = 1.6;
       path(pts);
       ctx.fill();
+      ctx.restore();
+    }
+
+    // Edge samples remain blue, then the complete detected road gets the final
+    // green outline so its full size is always unambiguous.
+    for (const name of BAND_STROKE_ORDER) {
+      const band = visible[name];
+      if (!band) continue;
+      const style = BAND_STYLE[band.name];
+      if (!style) continue;
+      const pts = bandOutline(corridor, band, 1, 1);
+      if (pts.length < 4) continue;
+
+      ctx.save();
+      ctx.strokeStyle = style.stroke;
+      ctx.lineWidth = name === 'road' ? 2.2 : 1.6;
+      path(pts);
       ctx.stroke();
 
       // Label low in the band, not at the horizon: up there the three bands

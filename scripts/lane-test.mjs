@@ -220,6 +220,15 @@ section('It refuses rather than inventing a road');
   check('a field of grass traces nothing', trace === null, trace ? `got width ${trace.meanWidth.toFixed(2)}` : '');
 }
 {
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    const v = 112 + (i % 7);
+    data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 255;
+  }
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+  check('featureless asphalt to both frame edges is refused, not called a track', trace === null);
+}
+{
   // A grey strip beside the camera can be tarmac run-off or the visible gap
   // beside a nosecone. It does not cross the forward axis, so it is not a road
   // corridor and must not become one just because its colour looks plausible.
@@ -286,7 +295,8 @@ section('Kerbs, markings and bodywork do not pull it off the tarmac');
   }
 }
 {
-  // A white line painted across the road — the trace must span it, not stop.
+  // A dashed centre/grid marking — the trace must span it, not stop. Unlike a
+  // solid track limit it is not vertically continuous through the course.
   const leftAt = (t) => 0.5 - (0.07 + 0.28 * t);
   const rightAt = (t) => 0.5 + (0.07 + 0.28 * t);
   const { img } = scene({ leftAt, rightAt });
@@ -298,6 +308,7 @@ section('Kerbs, markings and bodywork do not pull it off the tarmac');
     const cx = Math.round(0.5 * W);
     const half = Math.max(1, Math.round(0.006 * W));
     if (rightAt(t) < 0.5 || leftAt(t) > 0.5) continue;
+    if (Math.floor(y / 4) % 2 !== 0) continue;
     for (let x = cx - half; x <= cx + half; x++) {
       const i = (y * W + x) * 4;
       data[i] = 240; data[i + 1] = 240; data[i + 2] = 240;
@@ -516,6 +527,58 @@ section('Realistic onboard headcam view with wheels and bodywork');
     check('the map stops before the nosecone', headcamTrace.yBot < 0.72,
       `yBot ${headcamTrace.yBot.toFixed(3)}`);
   }
+}
+
+section('White track limits separate the course from paved runoff');
+{
+  // The course and runoff are deliberately identical grey asphalt. Only the
+  // solid white limits define the road, matching paved circuits/skidpads where
+  // a surface-colour flood fill cannot possibly find the correct boundary.
+  const leftAt = (t) => 0.48 - (0.07 + 0.22 * t) + 0.07 * t * t;
+  const rightAt = (t) => 0.48 + (0.07 + 0.22 * t) + 0.07 * t * t;
+  const { img } = scene({ leftAt: () => 0, rightAt: () => 1, horizon: 0.35 });
+  const data = img.data;
+  for (let y = Math.round(0.35 * H); y < H; y++) {
+    const t = (y / H - 0.35) / 0.65;
+    for (const bx of [leftAt(t), rightAt(t)]) {
+      const cx = Math.round(bx * W);
+      for (let x = cx - 2; x <= cx + 2; x++) {
+        if (x < 0 || x >= W) continue;
+        const i = (y * W + x) * 4;
+        data[i] = 235; data[i + 1] = 235; data[i + 2] = 235;
+      }
+    }
+  }
+  const trace = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('the marked course is found on same-colour runoff', trace !== null);
+  if (trace) {
+    const err = boundaryError(trace, leftAt, rightAt, 0.35);
+    check('solid track limits stop the trace before runoff', err < 0.055,
+      `mean error ${(err * 100).toFixed(1)}%`);
+  }
+}
+
+section('Neutral carbon bodywork is not mistaken for road');
+{
+  // Road centre swings right while the car stays in the image centre.
+  const leftAt = (t) => 0.5 - (0.07 + 0.30 * t) + 0.12 * t * t;
+  const rightAt = (t) => 0.5 + (0.07 + 0.30 * t) + 0.12 * t * t;
+  const { img } = scene({ leftAt, rightAt, horizon: 0.35 });
+  const data = img.data;
+  const noseTop = Math.round(0.61 * H);
+  for (let y = noseTop; y < H; y++) {
+    const ny = y / H;
+    const half = 0.045 + (ny - 0.61) * 0.36;
+    for (let x = Math.round((0.5 - half) * W); x <= Math.round((0.5 + half) * W); x++) {
+      const i = (y * W + x) * 4;
+      const v = 34 + ((x + y) % 5);
+      data[i] = v; data[i + 1] = v; data[i + 2] = v;
+    }
+  }
+  const trace = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('road above a grey/black nose is found', trace !== null);
+  if (trace) check('the trace stops before neutral bodywork', trace.yBot < 0.64,
+    `yBot ${trace.yBot.toFixed(3)}`);
 }
 
 console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m\n`);
