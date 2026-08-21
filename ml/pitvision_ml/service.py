@@ -167,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
 
             frame = decode_frame(image.encode())
             out = self.segmenter.infer(frame)
-            corridor = corridor_from_masks(out.road, out.lane, self.corridor_cfg)
+            corridor = corridor_from_masks(out.road, out.lane, self.corridor_cfg, frame)
 
             total_ms = (time.perf_counter() - started) * 1000
             self.stats.record(total_ms, corridor=corridor is not None)

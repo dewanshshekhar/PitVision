@@ -253,6 +253,7 @@ def _seed_index(
     sample_rows: np.ndarray,
     min_width_px: int,
     speckle_px: int,
+    frame_sat: np.ndarray | None = None,
 ) -> tuple[int, int] | None:
     """Find an unobstructed road row ahead of the camera/vehicle.
 
@@ -276,13 +277,23 @@ def _seed_index(
         if width < min_width_px:
             continue
 
+        if frame_sat is not None:
+            radius = max(2, int(w * 0.04))
+            seed_surface_sat = float(np.mean(frame_sat[y, centre - radius : centre + radius + 1]))
+            if seed_surface_sat > 0.34:
+                continue
+
         run_centre = (left + right) // 2
         spans_centre = left <= centre <= right
+        # A one-sided patch can be large, grey and at the right depth (for
+        # example the gap beside a nosecone). It must never seed the road.
+        if not spans_centre:
+            continue
         spans_both_sides = left / w <= 0.38 and right / w >= 0.62
         depth_score = 1.0 - min(1.0, abs(ny - 0.50) / 0.28)
         score = (
             width / w
-            + (0.35 if spans_both_sides else 0.15 if spans_centre else -0.30)
+            + (0.35 if spans_both_sides else 0.15)
             + depth_score * 0.15
             - abs(run_centre / w - 0.5) * 0.15
         )
@@ -317,6 +328,7 @@ def corridor_from_masks(
     road_prob: np.ndarray,
     lane_prob: np.ndarray | None,
     cfg: CorridorConfig,
+    frame_bgr: np.ndarray | None = None,
 ) -> Corridor | None:
     """Build a corridor from a road probability map and an optional lane map.
 
@@ -343,6 +355,14 @@ def corridor_from_masks(
     road = cv2.morphologyEx(road, cv2.MORPH_OPEN, kernel)
     road = _largest_component_containing_ego(road)
 
+    frame_sat = None
+    if frame_bgr is not None:
+        if frame_bgr.ndim != 3 or frame_bgr.shape[2] < 3:
+            raise ValueError(f"frame_bgr must be HxWx3, got shape {frame_bgr.shape}")
+        if frame_bgr.shape[:2] != (h, w):
+            frame_bgr = cv2.resize(frame_bgr, (w, h), interpolation=cv2.INTER_AREA)
+        frame_sat = cv2.cvtColor(frame_bgr[:, :, :3], cv2.COLOR_BGR2HSV)[:, :, 1].astype(np.float32) / 255.0
+
     lane = None
     if lane_prob is not None:
         if lane_prob.shape != road_prob.shape:
@@ -365,10 +385,16 @@ def corridor_from_masks(
     min_width_px = max(2, int(cfg.min_row_width * w))
     speckle_px = max(2, int(cfg.max_bridge * w * 0.12))
 
-    seed = _seed_index(road, sample_rows, min_width_px, speckle_px)
+    seed = _seed_index(road, sample_rows, min_width_px, speckle_px, frame_sat)
     if seed is None:
         return None
     seed_i, seed_x = seed
+
+    seed_y = sample_rows[seed_i]
+    seed_run = _row_run(road[seed_y], seed_x, speckle_px, 0)
+    seed_sat = 0.0
+    if frame_sat is not None and seed_run is not None:
+        seed_sat = float(np.mean(frame_sat[seed_y, seed_run[0] : seed_run[1] + 1]))
 
     def walk(start: int, stop: int, step: int) -> None:
         nonlocal limits_from_lane
@@ -390,6 +416,31 @@ def corridor_from_masks(
             misses = 0
 
             a, b, _ = run
+
+            # If an obstruction splits a row, _row_run may otherwise fall
+            # back to its wider side and move the whole corridor there. Leave
+            # the row missing so the smooth fit bridges the obstruction.
+            if not (a <= centre <= b):
+                row = road[sample_rows[i]]
+                if row[:centre].any() and row[centre + 1 :].any():
+                    misses += 1
+                    if misses > 3:
+                        break
+                    i += step
+                    continue
+
+            # Segmentation occasionally labels coloured nose/bodywork as
+            # drivable area. The mask alone cannot identify that mistake, so
+            # the live service also checks the original frame. A persistent,
+            # strongly coloured central surface below the seed is the car, not
+            # road; stop before it instead of painting over the vehicle.
+            if frame_sat is not None and step > 0 and sample_rows[i] > h * 0.52:
+                radius = max(2, int(w * 0.06))
+                lo_c, hi_c = max(0, centre - radius), min(w, centre + radius + 1)
+                centre_sat = float(np.mean(frame_sat[sample_rows[i], lo_c:hi_c]))
+                if centre_sat > max(0.34, seed_sat + 0.18):
+                    break
+
             lane_row = lane[sample_rows[i]] if lane is not None else None
             a, b, from_lane = _refine_with_lane_lines(a, b, lane_row, cfg)
             if from_lane:

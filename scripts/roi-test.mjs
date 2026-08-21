@@ -15,7 +15,8 @@
  */
 
 import { traceLane, DEFAULT_TRACE_OPTIONS, ROWS } from '../src/cv/lane.ts';
-import { corridorFromTrace, corridorFromRoad, DEFAULT_ROAD } from '../src/cv/rois.ts';
+import { corridorFromTrace, corridorFromRoad, DEFAULT_ROAD, SUB_BANDS } from '../src/cv/rois.ts';
+import { BAND_STYLE } from '../src/ui/overlay-bands.ts';
 import { analyseFrame } from '../src/cv/metrics.ts';
 
 const W = 384;
@@ -30,6 +31,20 @@ const check = (name, ok, detail = '') => {
   else { failed++; console.log(`  \x1b[31m✗\x1b[0m ${name}${detail ? ` — ${detail}` : ''}`); }
 };
 const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
+
+// ── Overlay semantics ─────────────────────────────────────────────────
+section('The overlay maps the full road and its two sides');
+{
+  const byName = Object.fromEntries(SUB_BANDS.map((band) => [band.name, band]));
+  check('the green road band spans the complete corridor',
+    byName.road.u0 === 0 && byName.road.u1 === 1);
+  check('the blue left band stays on the left edge',
+    byName.left.u0 === 0 && byName.left.u1 < 0.5);
+  check('the blue right band stays on the right edge',
+    byName.right.u0 > 0.5 && byName.right.u1 === 1);
+  check('the overlay draws road plus sides, not the narrow centre band',
+    Boolean(BAND_STYLE.road && BAND_STYLE.left && BAND_STYLE.right && !BAND_STYLE.line));
+}
 
 let seed = 99;
 const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
