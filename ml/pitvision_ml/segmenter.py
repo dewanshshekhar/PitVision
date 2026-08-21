@@ -98,15 +98,29 @@ def _adapt_yolop(outputs: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray | No
     order them inconsistently and an off-by-one here silently swaps road for
     lane markings.
     """
-    seg_heads = [o for o in outputs if np.squeeze(o).ndim >= 2 and np.squeeze(o).size > 1024]
-    if len(seg_heads) < 2:
+    # A TorchScript YOLOPv2 export flattens its nested detection tuple into
+    # several ONNX outputs before the two segmentation maps. Detection tensors
+    # can also be large, so size alone does not identify a segmentation head.
+    # Keep only values that can actually collapse to a plausible spatial map.
+    probs: list[np.ndarray] = []
+    for output in outputs:
+        try:
+            prob = _to_prob(output)
+        except ValueError:
+            continue
+        h, w = prob.shape
+        aspect = w / max(1, h)
+        if h >= 16 and w >= 16 and 0.25 <= aspect <= 4.0:
+            probs.append(prob)
+
+    if len(probs) < 2:
         raise ValueError(
-            f"expected two segmentation heads, found {len(seg_heads)} in outputs "
+            f"expected two segmentation heads, found {len(probs)} in outputs "
             f"with shapes {[o.shape for o in outputs]}"
         )
     # Drivable area covers far more pixels than lane markings, at the same
     # resolution. That ratio is the reliable discriminator.
-    probs = [_to_prob(h) for h in seg_heads[:2]]
+    probs = sorted(probs, key=lambda p: p.size, reverse=True)[:2]
     coverage = [float((p > 0.5).mean()) for p in probs]
     road_i = int(np.argmax(coverage))
     lane_i = 1 - road_i

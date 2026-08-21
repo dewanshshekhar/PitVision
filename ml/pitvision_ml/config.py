@@ -116,14 +116,6 @@ class CorridorConfig:
     #: only closes quantisation gaps so they cannot fragment the continuity test.
     max_bridge: float = 0.18
 
-    #: Inset from the detected boundary before sampling, as a fraction of width.
-    #:
-    #: Same reason as the geometric tracer: the last few per cent of the width
-    #: is white line and kerb, and painted kerbing is bright and near-colourless,
-    #: which the specular signal reads as standing water.
-    edge_inset: float = 0.06
-
-
 @dataclass(frozen=True)
 class ServiceConfig:
     host: str = os.environ.get("PITVISION_ML_HOST", "127.0.0.1")

@@ -248,6 +248,71 @@ def _fit_quadratic(values: np.ndarray, mask: np.ndarray) -> np.ndarray | None:
     return np.polyval(coeffs, np.arange(n) / n)
 
 
+def _seed_index(
+    road: np.ndarray,
+    sample_rows: np.ndarray,
+    min_width_px: int,
+    speckle_px: int,
+) -> tuple[int, int] | None:
+    """Find an unobstructed road row ahead of the camera/vehicle.
+
+    Starting at the bottom is wrong for onboard footage: the nose splits the
+    road mask into two wedges and the row scanner confidently follows one of
+    them. Search the mid-depth view instead, where the whole track is visible,
+    then grow both toward the horizon and toward the vehicle.
+    """
+    h, w = road.shape
+    centre = w // 2
+    best: tuple[float, int, int] | None = None
+
+    for i, y in enumerate(sample_rows):
+        ny = y / h
+        if ny < 0.34 or ny > 0.70:
+            continue
+        run = _row_run(road[y], centre, speckle_px, 0)
+        if run is None:
+            continue
+        left, right, width = run
+        if width < min_width_px:
+            continue
+
+        run_centre = (left + right) // 2
+        spans_centre = left <= centre <= right
+        spans_both_sides = left / w <= 0.38 and right / w >= 0.62
+        depth_score = 1.0 - min(1.0, abs(ny - 0.50) / 0.28)
+        score = (
+            width / w
+            + (0.35 if spans_both_sides else 0.15 if spans_centre else -0.30)
+            + depth_score * 0.15
+            - abs(run_centre / w - 0.5) * 0.15
+        )
+        if best is None or score > best[0]:
+            best = (score, i, run_centre)
+
+    return (best[1], best[2]) if best else None
+
+
+def _bottom_connected_centre_gap(
+    road: np.ndarray,
+    sample_rows: np.ndarray,
+    index: int,
+    centre: int,
+) -> bool:
+    """Whether a central obstruction continues from this row to frame bottom.
+
+    A car ahead makes a bounded hole and road reappears below it, so it should
+    be bridged. A camera hood/nose reaches the bottom and must terminate the
+    measurable corridor before the sampler starts reading bodywork.
+    """
+    _, w = road.shape
+    radius = max(1, int(w * 0.008))
+    lo, hi = max(0, centre - radius), min(w, centre + radius + 1)
+    row = road[sample_rows[index]]
+    if row[lo:hi].any() or not row[:lo].any() or not row[hi:].any():
+        return False
+    return all(not road[y, lo:hi].any() for y in sample_rows[index:])
+
+
 def corridor_from_masks(
     road_prob: np.ndarray,
     lane_prob: np.ndarray | None,
@@ -300,28 +365,45 @@ def corridor_from_masks(
     min_width_px = max(2, int(cfg.min_row_width * w))
     speckle_px = max(2, int(cfg.max_bridge * w * 0.12))
 
-    # Walk from the camera upward so each row can be seeded by the one below —
-    # both for where to look and for how wide the answer should be.
-    seed = w // 2
-    prev_width = 0
-    for i in range(rows - 1, -1, -1):
-        run = _row_run(road[sample_rows[i]], seed, speckle_px, prev_width)
-        if run is None:
-            continue
-        a, b, width = run
-        if width < min_width_px:
-            continue
+    seed = _seed_index(road, sample_rows, min_width_px, speckle_px)
+    if seed is None:
+        return None
+    seed_i, seed_x = seed
 
-        lane_row = lane[sample_rows[i]] if lane is not None else None
-        a, b, from_lane = _refine_with_lane_lines(a, b, lane_row, cfg)
-        if from_lane:
-            limits_from_lane += 1
+    def walk(start: int, stop: int, step: int) -> None:
+        nonlocal limits_from_lane
+        centre = seed_x
+        prev_width = 0
+        misses = 0
+        i = start
+        while (i <= stop if step > 0 else i >= stop):
+            if step > 0 and _bottom_connected_centre_gap(road, sample_rows, i, centre):
+                break
 
-        left[i] = a
-        right[i] = b
-        found[i] = True
-        seed = (a + b) // 2
-        prev_width = b - a
+            run = _row_run(road[sample_rows[i]], centre, speckle_px, prev_width)
+            if run is None or run[2] < min_width_px:
+                misses += 1
+                if misses > 3:
+                    break
+                i += step
+                continue
+            misses = 0
+
+            a, b, _ = run
+            lane_row = lane[sample_rows[i]] if lane is not None else None
+            a, b, from_lane = _refine_with_lane_lines(a, b, lane_row, cfg)
+            if from_lane:
+                limits_from_lane += 1
+
+            left[i] = a
+            right[i] = b
+            found[i] = True
+            centre = (a + b) // 2
+            prev_width = b - a
+            i += step
+
+    walk(seed_i, rows - 1, 1)
+    walk(seed_i - 1, 0, -1)
 
     measured = int(found.sum())
     if measured < 8:
@@ -346,10 +428,11 @@ def corridor_from_masks(
 
     lo = np.minimum(out_l, out_r)
     hi = np.maximum(out_l, out_r)
-    span = np.maximum(hi - lo, 0)
-    inset = span * cfg.edge_inset
-    lo = np.clip((lo + inset) / w, 0.0, 1.0)
-    hi = np.clip((hi - inset) / w, 0.0, 1.0)
+    # Emit raw track limits, exactly like LaneTrace. The browser applies the
+    # single sampling inset in corridorFromTrace; doing it here too narrowed a
+    # segmented corridor twice and made the overlay disagree with the mask.
+    lo = np.clip(lo / w, 0.0, 1.0)
+    hi = np.clip(hi / w, 0.0, 1.0)
 
     mean_width = float(np.mean(hi - lo))
     if mean_width < cfg.min_row_width:
