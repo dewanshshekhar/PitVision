@@ -6,6 +6,11 @@ dist/
 # Demo clips are large and belong out of git — drop them in public/footage/
 public/footage/*
 !public/footage/.gitkeep
+!public/footage/README.md
+!public/footage/formula-student-turn-1.mp4
+!public/footage/formula-student-turn-2.mp4
+!public/footage/formula-student-sun-turn.mp4
+!public/footage/formula-student-chicane.mp4
 Headcam footage/
 
 # The telemetry database

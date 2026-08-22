@@ -27,6 +27,17 @@ the whole setup:
 There is a generated scene available if you want to poke at it before footage exists, but
 it is a stand-in, not the product.
 
+Four small, redistributable Formula Student onboard clips are bundled under
+`public/footage/` for the hackathon demo. Paste one of these into **Use URL**:
+
+- `/footage/formula-student-turn-1.mp4` (12 s)
+- `/footage/formula-student-turn-2.mp4` (12 s)
+- `/footage/formula-student-sun-turn.mp4` (4.5 s)
+- `/footage/formula-student-chicane.mp4` (5.1 s)
+
+They are formula-style halo/overhead camera clips, not Formula 1 broadcast
+footage. Source and redistribution terms are in `public/footage/README.md`.
+
 For AI verification, add a key first:
 
 ```bash

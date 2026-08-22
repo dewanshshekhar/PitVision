@@ -16,7 +16,7 @@
 
 import { traceLane, DEFAULT_TRACE_OPTIONS, ROWS } from '../src/cv/lane.ts';
 import { corridorFromTrace, corridorFromRoad, DEFAULT_ROAD, SUB_BANDS } from '../src/cv/rois.ts';
-import { BAND_STYLE } from '../src/ui/overlay-bands.ts';
+import { BAND_FILL_ORDER, BAND_STROKE_ORDER, BAND_STYLE } from '../src/ui/overlay-bands.ts';
 import { analyseFrame } from '../src/cv/metrics.ts';
 
 const W = 384;
@@ -44,6 +44,8 @@ section('The overlay maps the full road and its two sides');
     byName.right.u0 > 0.5 && byName.right.u1 === 1);
   check('the overlay draws road plus sides, not the narrow centre band',
     Boolean(BAND_STYLE.road && BAND_STYLE.left && BAND_STYLE.right && !BAND_STYLE.line));
+  check('the green full-road outline is drawn after both blue edge outlines',
+    BAND_STROKE_ORDER.at(-1) === 'road' && BAND_FILL_ORDER[0] === 'road');
 }
 
 let seed = 99;

@@ -88,7 +88,10 @@ export interface TraceOptions {
 }
 
 export const DEFAULT_TRACE_OPTIONS: TraceOptions = {
-  searchTop: 0.34,
+  // T-cam and halo cameras often point down enough that useful tarmac begins
+  // near the top fifth of the image. Sky/material checks still decide the
+  // actual first measured row; this only prevents us discarding visible road.
+  searchTop: 0.18,
   searchBottom: 0.98,
   // Asphalt is near-colourless. 0.30 admits weathered and wet tarmac (water
   // raises apparent saturation slightly) while still rejecting grass and
@@ -185,7 +188,9 @@ function findSeed(img: ImageData, opts: TraceOptions, priorCenterX = 0.5): Seed 
   let best: Seed | null = null;
 
   // Search candidate depths in the open road zone ahead of the car hood
-  const yStart = Math.floor(Math.min(0.70, opts.searchBottom) * h);
+  // Never seed on the car. A T-cam/halo view commonly puts grey or black
+  // bodywork below ~0.58; it can look more like asphalt than the asphalt does.
+  const yStart = Math.floor(Math.min(0.56, opts.searchBottom) * h);
   const yEnd = Math.ceil(opts.searchTop * h);
 
   const paintGap = Math.max(4, Math.round(w * 0.04));
@@ -327,6 +332,40 @@ function scanRow(
 
   const paintGap = Math.max(4, Math.round(w * 0.04));
   const materialGap = 3;
+  const minLimitDistance = w * 0.025;
+
+  const isBrightNeutral = (x: number, yy: number, brightLimit: number) => {
+    if (x < 1 || x > w - 2 || yy < 1 || yy >= bufH - 1) return false;
+    const p = yy * w + x;
+    return sat[p] <= Math.min(0.16, opts.maxSat) && luma[p] >= brightLimit;
+  };
+
+  const isTrackLimit = (x: number) => {
+    if (Math.abs(x - cx) < minLimitDistance) return false;
+    const brightLimit = Math.max(158, reference + tol * 0.72);
+    if (!isBrightNeutral(x, y, brightLimit)) return false;
+
+    // Water/glare is a region, not a stripe. Only a narrow bright run can be a
+    // painted limit; broad highlights must remain measurable road surface.
+    let lo = x;
+    let hi = x;
+    const maxStripe = Math.max(5, Math.round(w * 0.035));
+    while (lo > 1 && isBrightNeutral(lo - 1, y, brightLimit) && x - lo <= maxStripe) lo--;
+    while (hi < w - 2 && isBrightNeutral(hi + 1, y, brightLimit) && hi - x <= maxStripe) hi++;
+    if (hi - lo + 1 > maxStripe) return false;
+
+    // Track limits run along the course. Grid marks, isolated reflections and
+    // compression flashes do not persist vertically around the same x.
+    let persists = 0;
+    for (const dy of [-4, -2, 2, 4]) {
+      let seen = false;
+      for (let dx = -5; dx <= 5 && !seen; dx++) {
+        seen = isBrightNeutral(x + dx, y + dy, brightLimit);
+      }
+      if (seen) persists++;
+    }
+    return persists >= 3;
+  };
 
   let sumL = 0;
   let sumL2 = 0;
@@ -378,6 +417,7 @@ function scanRow(
     let edge = cx;
     let paint = 0;
     let material = 0;
+    let boundary = false;
     for (let x = from; step > 0 ? x <= limit : x >= limit; x += step) {
       const t = test(x);
       if (t === 2) {
@@ -390,16 +430,37 @@ function scanRow(
         sumS += sat[row + x];
         n++;
       } else if (t === 1) {
-        if (++paint > paintGap) break;
+        // A solid white track-limit line is not a gap to bridge. This is what
+        // separates racing surface from same-colour asphalt runoff, especially
+        // on skidpads and paved Formula Student courses. Ignore markings close
+        // to the centre (grid/centre lines), but stop at a bright neutral stripe
+        // far enough out to be a plausible boundary.
+        if (isTrackLimit(x)) {
+          boundary = true;
+          break;
+        }
+        if (++paint > paintGap) {
+          boundary = true;
+          break;
+        }
       } else if (++material > materialGap) {
-        break;
+          boundary = true;
+          break;
       }
     }
-    return edge;
+    return { edge, boundary };
   };
 
-  let l = walk(cx, -1, 1);
-  let r = walk(cx + 1, 1, w - 2);
+  const leftWalk = walk(cx, -1, 1);
+  const rightWalk = walk(cx + 1, 1, w - 2);
+  const l = leftWalk.edge;
+  const r = rightWalk.edge;
+
+  // A grey field reaching both frame edges contains no evidence of where the
+  // course ends. Returning it as a high-confidence road is how the overlay
+  // wandered across paved runoff. One visible material or painted limit is the
+  // minimum evidence; the temporal tracker can carry the other side briefly.
+  if (!leftWalk.boundary && !rightWalk.boundary) return null;
 
   // Perspective is strictly monotonic: road narrows toward horizon (-1), widens toward camera (+1)
   if (prevWidth > 0 && r - l > prevWidth * (direction < 0 ? 1.04 : 1.85)) {
@@ -491,17 +552,53 @@ export function traceLane(
 
       // On downward scan (approaching vehicle): stop when central road hits car hood / nosecone
       if (step > 0 && cy > 0.52 * h) {
+        // The car is fixed in camera coordinates; the road centre is not. On a
+        // turn `cx` can move far enough sideways that checking around it misses
+        // the nose and lets the fitted boundary run straight across bodywork.
+        const bodyCx = Math.round(w * 0.5);
         const centerOffset = Math.round(w * 0.06);
-        const c1 = Math.max(1, cx - centerOffset);
-        const c2 = Math.min(w - 2, cx + centerOffset);
+        const c1 = Math.max(1, bodyCx - centerOffset);
+        const c2 = Math.min(w - 2, bodyCx + centerOffset);
         let centerSat = 0;
+        let roadLike = 0;
+        let sideRoadLike = 0;
+        let sideCount = 0;
         let cnt = 0;
         for (let x = c1; x <= c2; x++) {
-          centerSat += satBuf![cy * w + x];
+          const p = cy * w + x;
+          centerSat += satBuf![p];
+          if (
+            satBuf![p] <= opts.maxSat &&
+            Math.abs(lumaBuf![p] - reference) <= opts.lumaTolerance
+          ) roadLike++;
           cnt++;
         }
-        // Livery color / car bodywork in center indicates the road has ended at the car nose
-        if (cnt > 0 && centerSat / cnt > opts.maxSat * 1.1) {
+        const inner = Math.round(w * 0.10);
+        const outer = Math.round(w * 0.19);
+        for (let dx = -outer; dx <= outer; dx++) {
+          if (Math.abs(dx) < inner) continue;
+          const x = bodyCx + dx;
+          if (x < 1 || x > w - 2) continue;
+          const p = cy * w + x;
+          if (
+            satBuf![p] <= opts.maxSat &&
+            Math.abs(lumaBuf![p] - reference) <= opts.lumaTolerance
+          ) sideRoadLike++;
+          sideCount++;
+        }
+        const centerShare = roadLike / Math.max(1, cnt);
+        const sideShare = sideRoadLike / Math.max(1, sideCount);
+        // Coloured, black and bare-carbon noses are all common. Saturation alone
+        // only catches liveries. A neutral nose is a *local* centre obstruction;
+        // a brightness change spanning the side patches too is water/shadow and
+        // must be allowed to update the running road reference.
+        if (
+          cnt > 0 &&
+          (
+            centerSat / cnt > opts.maxSat * 1.1 ||
+            (centerShare < 0.42 && sideShare > centerShare + 0.24)
+          )
+        ) {
           break;
         }
       }
