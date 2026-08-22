@@ -1,0 +1,585 @@
+/**
+ * Lane tracer tests, headless.
+ *
+ * The tracer is the piece most likely to be subtly wrong, and "it compiles"
+ * proves nothing about whether it follows a road. These build synthetic frames
+ * with known geometry and check the trace against it.
+ *
+ * Synthetic scenes are not footage and passing here is not proof it works on a
+ * wet Montreal onboard. What they do prove is the part that is checkable: that
+ * it follows a curve rather than fitting a box, that it refuses when there is
+ * no road, and that the things known to break the old fixed trapezoid — grass,
+ * kerbs, a car in frame — do not pull it off the tarmac.
+ *
+ *   node scripts/lane-test.mjs
+ */
+
+import { traceLane, LaneTracker, DEFAULT_TRACE_OPTIONS, ROWS } from '../src/cv/lane.ts';
+
+const W = 384;
+const H = 216;
+
+let passed = 0;
+let failed = 0;
+
+function check(name, ok, detail = '') {
+  if (ok) {
+    passed++;
+    console.log(`  \x1b[32m✓\x1b[0m ${name}`);
+  } else {
+    failed++;
+    console.log(`  \x1b[31m✗\x1b[0m ${name}${detail ? ` — ${detail}` : ''}`);
+  }
+}
+
+function section(t) {
+  console.log(`\n\x1b[1m${t}\x1b[0m`);
+}
+
+// Deterministic noise, so a failure is reproducible.
+let seed = 12345;
+function rnd() {
+  seed = (seed * 1664525 + 1013904223) >>> 0;
+  return seed / 4294967296;
+}
+
+/**
+ * Build a frame containing a road whose boundaries are given by functions of
+ * normalised depth. Everything outside the road is grass; above the horizon is
+ * sky.
+ */
+function scene({ leftAt, rightAt, horizon = 0.36, roadLuma = 118, opts = {} }) {
+  const data = new Uint8ClampedArray(W * H * 4);
+  const put = (x, y, r, g, b) => {
+    const i = (y * W + x) * 4;
+    data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255;
+  };
+
+  for (let y = 0; y < H; y++) {
+    const ny = y / H;
+    for (let x = 0; x < W; x++) {
+      const nx = x / W;
+      if (ny < horizon) {
+        // Sky: bright and strongly coloured.
+        put(x, y, 120, 165, 225);
+        continue;
+      }
+      const t = (ny - horizon) / (1 - horizon);
+      const l = leftAt(t);
+      const r = rightAt(t);
+      if (nx >= l && nx <= r) {
+        // Tarmac: grey, mid-bright, aggregate speckle.
+        const n = (rnd() - 0.5) * 26;
+        const v = roadLuma + n;
+        put(x, y, v, v, v * 1.01);
+      } else {
+        // Grass: green and much noisier.
+        const n = (rnd() - 0.5) * 40;
+        put(x, y, 58 + n, 104 + n, 44 + n);
+      }
+    }
+  }
+
+  const img = { width: W, height: H, data };
+  return { img, trace: traceLane(img, { ...DEFAULT_TRACE_OPTIONS, ...opts }) };
+}
+
+/** Ground-truth boundary at the same depth the trace reports for row i. */
+function truthAt(fn, trace, i, horizon = 0.36) {
+  const ny = trace.yTop + ((trace.yBot - trace.yTop) * i) / (ROWS - 1);
+  const t = (ny - horizon) / (1 - horizon);
+  return fn(Math.max(0, Math.min(1, t)));
+}
+
+/** Mean absolute error of both boundaries against the truth, in normalised x. */
+function boundaryError(trace, leftAt, rightAt, horizon = 0.36) {
+  let sum = 0;
+  let n = 0;
+  // Skip the extreme far rows: the fit extrapolates there and the road is only
+  // a few pixels wide, so the truth itself is barely resolvable.
+  for (let i = 6; i < ROWS - 2; i++) {
+    sum += Math.abs(trace.left[i] - truthAt(leftAt, trace, i, horizon));
+    sum += Math.abs(trace.right[i] - truthAt(rightAt, trace, i, horizon));
+    n += 2;
+  }
+  return sum / n;
+}
+
+// ── Straight road ──────────────────────────────────────────────────────
+section('A straight road');
+{
+  const leftAt = (t) => 0.5 - (0.06 + 0.30 * t);
+  const rightAt = (t) => 0.5 + (0.06 + 0.30 * t);
+  const { trace } = scene({ leftAt, rightAt });
+
+  check('the road is found', trace !== null);
+  if (trace) {
+    const err = boundaryError(trace, leftAt, rightAt);
+    check('boundaries land within 3% of the truth', err < 0.03, `mean error ${(err * 100).toFixed(1)}%`);
+    check('most rows are measured, not extrapolated', trace.confidence > 0.75, `confidence ${trace.confidence.toFixed(2)}`);
+    check('the traced surface reads as grey', trace.surfaceSat < 0.12, `sat ${trace.surfaceSat.toFixed(3)}`);
+    check('the corridor widens toward the camera', trace.right[ROWS - 1] - trace.left[ROWS - 1] > trace.right[4] - trace.left[4]);
+  }
+}
+
+// ── Curved road: the case a trapezoid cannot represent ─────────────────
+section('A road that curves — what a fixed trapezoid cannot follow');
+{
+  // Centre swings 22% of frame width across the depth of the shot.
+  const centre = (t) => 0.5 + 0.22 * t * t;
+  const half = (t) => 0.07 + 0.24 * t;
+  const leftAt = (t) => centre(t) - half(t);
+  const rightAt = (t) => centre(t) + half(t);
+  const { trace } = scene({ leftAt, rightAt });
+
+  check('the curved road is found', trace !== null);
+  if (trace) {
+    const err = boundaryError(trace, leftAt, rightAt);
+    check('the trace follows the curve within 3%', err < 0.03, `mean error ${(err * 100).toFixed(1)}%`);
+
+    // The point of the whole exercise: the centre must actually move.
+    const nearC = (trace.left[ROWS - 2] + trace.right[ROWS - 2]) / 2;
+    const farC = (trace.left[6] + trace.right[6]) / 2;
+    check('the traced centre moves with the corner', Math.abs(nearC - farC) > 0.08,
+      `far ${farC.toFixed(2)} → near ${nearC.toFixed(2)}`);
+
+    // A straight-sided box spanning the same rows would have to include
+    // everything between the extremes of the curve, most of which is grass.
+    let traced = 0;
+    let boxed = 0;
+    let minL = 1, maxR = 0;
+    for (let i = 0; i < ROWS; i++) {
+      traced += trace.right[i] - trace.left[i];
+      minL = Math.min(minL, trace.left[i]);
+      maxR = Math.max(maxR, trace.right[i]);
+    }
+    boxed = (maxR - minL) * ROWS;
+    check('the trace is materially tighter than its bounding box', traced < boxed * 0.85,
+      `traced ${(traced / ROWS).toFixed(3)} vs box ${(boxed / ROWS).toFixed(3)} per row`);
+  }
+}
+
+section('A tight changing-radius turn stays accurate');
+{
+  // A progressive corner: little movement at turn-in, then rapidly increasing
+  // curvature. This is deliberately harder than the constant-radius fixture.
+  const centre = (t) => 0.5 + 0.18 * t ** 4;
+  const half = (t) => 0.07 + 0.22 * t;
+  const leftAt = (t) => centre(t) - half(t);
+  const rightAt = (t) => centre(t) + half(t);
+  const { trace } = scene({ leftAt, rightAt });
+
+  check('the progressive turn is found', trace !== null);
+  if (trace) {
+    const err = boundaryError(trace, leftAt, rightAt);
+    check('row-wise boundaries preserve the changing radius', err < 0.012,
+      `mean error ${(err * 100).toFixed(2)}%`);
+  }
+}
+
+section('Temporal tracking follows steering instead of trailing it');
+{
+  const tracker = new LaneTracker();
+  let tracked = null;
+  let fresh = null;
+  let now = 100;
+
+  // Six real retraces across a quick turn-in. Comparing with the unsmoothed
+  // result isolates temporal lag from the accuracy of the per-frame detector.
+  for (const turn of [0, 0.035, 0.07, 0.105, 0.14, 0.175]) {
+    const centre = (t) => 0.5 + turn * (0.25 + 0.75 * t * t);
+    const half = (t) => 0.07 + 0.22 * t;
+    const leftAt = (t) => centre(t) - half(t);
+    const rightAt = (t) => centre(t) + half(t);
+    const built = scene({ leftAt, rightAt });
+    fresh = built.trace;
+    tracked = tracker.update(built.img, now);
+    now += 61;
+  }
+
+  check('the final turning frame is detected', tracked !== null && fresh !== null);
+  if (tracked && fresh) {
+    const i = Math.floor(ROWS * 0.72);
+    const trackedCentre = (tracked.left[i] + tracked.right[i]) / 2;
+    const freshCentre = (fresh.left[i] + fresh.right[i]) / 2;
+    check('tracking lag stays under 3.5% of frame width', Math.abs(trackedCentre - freshCentre) < 0.035,
+      `lag ${(Math.abs(trackedCentre - freshCentre) * 100).toFixed(1)}%`);
+  }
+}
+
+// ── Refusal ────────────────────────────────────────────────────────────
+section('It refuses rather than inventing a road');
+{
+  // All grass, no tarmac anywhere.
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    const n = (rnd() - 0.5) * 40;
+    data[i * 4] = 58 + n; data[i * 4 + 1] = 104 + n; data[i * 4 + 2] = 44 + n; data[i * 4 + 3] = 255;
+  }
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+  check('a field of grass traces nothing', trace === null, trace ? `got width ${trace.meanWidth.toFixed(2)}` : '');
+}
+{
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    const v = 112 + (i % 7);
+    data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 255;
+  }
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+  check('featureless asphalt to both frame edges is refused, not called a track', trace === null);
+}
+{
+  // A grey strip beside the camera can be tarmac run-off or the visible gap
+  // beside a nosecone. It does not cross the forward axis, so it is not a road
+  // corridor and must not become one just because its colour looks plausible.
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      if (y / H >= 0.34 && x / W >= 0.05 && x / W <= 0.30) {
+        data[i] = 112; data[i + 1] = 112; data[i + 2] = 114;
+      } else {
+        data[i] = 58; data[i + 1] = 104; data[i + 2] = 44;
+      }
+      data[i + 3] = 255;
+    }
+  }
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+  check('a one-sided grey patch cannot become the mapped road', trace === null,
+    trace ? `center ${((trace.left[24] + trace.right[24]) / 2).toFixed(2)}` : '');
+}
+{
+  // Pure sky.
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    data[i * 4] = 120; data[i * 4 + 1] = 165; data[i * 4 + 2] = 225; data[i * 4 + 3] = 255;
+  }
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+  check('an empty sky traces nothing', trace === null);
+}
+
+// ── The things that broke the fixed trapezoid ──────────────────────────
+section('Kerbs, markings and bodywork do not pull it off the tarmac');
+{
+  // Road with red/white kerbing painted along both edges. Kerbing is the
+  // classic failure: bright and desaturated, it reads as specular reflection
+  // and fabricates a dry line that is not there.
+  const leftAt = (t) => 0.5 - (0.07 + 0.28 * t);
+  const rightAt = (t) => 0.5 + (0.07 + 0.28 * t);
+  const { img, trace } = scene({ leftAt, rightAt });
+
+  const data = img.data;
+  for (let y = 0; y < H; y++) {
+    const ny = y / H;
+    if (ny < 0.36) continue;
+    const t = (ny - 0.36) / (1 - 0.36);
+    const kerbW = Math.max(2, Math.round(0.03 * W));
+    const paint = (px) => {
+      for (let k = 0; k < kerbW; k++) {
+        const x = px + k;
+        if (x < 0 || x >= W) continue;
+        const i = (y * W + x) * 4;
+        const red = ((y >> 3) + k) % 2 === 0;
+        data[i] = red ? 198 : 238; data[i + 1] = red ? 46 : 238; data[i + 2] = red ? 40 : 238;
+      }
+    };
+    paint(Math.round(leftAt(t) * W) - kerbW);
+    paint(Math.round(rightAt(t) * W));
+  }
+
+  const kerbed = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('road with kerbing is still found', kerbed !== null);
+  if (kerbed) {
+    const err = boundaryError(kerbed, leftAt, rightAt);
+    check('the trace stops at the tarmac, not past the kerb', err < 0.035, `mean error ${(err * 100).toFixed(1)}%`);
+  }
+}
+{
+  // A dashed centre/grid marking — the trace must span it, not stop. Unlike a
+  // solid track limit it is not vertically continuous through the course.
+  const leftAt = (t) => 0.5 - (0.07 + 0.28 * t);
+  const rightAt = (t) => 0.5 + (0.07 + 0.28 * t);
+  const { img } = scene({ leftAt, rightAt });
+  const data = img.data;
+  for (let y = 0; y < H; y++) {
+    const ny = y / H;
+    if (ny < 0.36) continue;
+    const t = (ny - 0.36) / (1 - 0.36);
+    const cx = Math.round(0.5 * W);
+    const half = Math.max(1, Math.round(0.006 * W));
+    if (rightAt(t) < 0.5 || leftAt(t) > 0.5) continue;
+    if (Math.floor(y / 4) % 2 !== 0) continue;
+    for (let x = cx - half; x <= cx + half; x++) {
+      const i = (y * W + x) * 4;
+      data[i] = 240; data[i + 1] = 240; data[i + 2] = 240;
+    }
+  }
+  const lined = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('a painted line does not split the corridor', lined !== null);
+  if (lined) {
+    const err = boundaryError(lined, leftAt, rightAt);
+    check('the corridor still spans the full road', err < 0.035, `mean error ${(err * 100).toFixed(1)}%`);
+  }
+}
+{
+  // Onboard view: the car's own bodywork fills the bottom of the frame. The
+  // old fixed trapezoid assumed road was in the lower half and measured the
+  // car instead. The trace must lock onto the road above it.
+  const leftAt = (t) => 0.5 - (0.07 + 0.30 * t);
+  const rightAt = (t) => 0.5 + (0.07 + 0.30 * t);
+  const { img } = scene({ leftAt, rightAt });
+  const data = img.data;
+  const noseTop = Math.round(0.72 * H);
+  for (let y = noseTop; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      // Strongly coloured livery — the giveaway that it is not asphalt.
+      data[i] = 208; data[i + 1] = 28; data[i + 2] = 32;
+    }
+  }
+  const onboard = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('the road above the bodywork is found', onboard !== null);
+  if (onboard) {
+    // Every traced row must sit on tarmac, not on the nose.
+    let onCar = 0;
+    for (let i = 0; i < ROWS; i++) {
+      const ny = onboard.yTop + ((onboard.yBot - onboard.yTop) * i) / (ROWS - 1);
+      const cx = Math.round(((onboard.left[i] + onboard.right[i]) / 2) * W);
+      const y = Math.round(ny * H);
+      if (y < noseTop) continue;
+      const p = (Math.min(H - 1, y) * W + cx) * 4;
+      // Red channel far above green means livery, not asphalt.
+      if (data[p] - data[p + 1] > 60) onCar++;
+    }
+    check('no traced row sits on the car', onCar === 0, `${onCar} rows on bodywork`);
+  }
+}
+
+// ── Standing water, which is the thing it exists to measure ────────────
+section('A sheet of standing water does not truncate the trace');
+{
+  // Water reflecting the sky is far brighter than the dry tarmac a few metres
+  // nearer. The scan carries a brightness reference from the row below, and a
+  // band that spans the full width across several rows accepts nothing — so
+  // the reference never adapts and the trace used to stop dead, precisely at
+  // the standing water it exists to measure.
+  const leftAt = (t) => 0.5 - (0.07 + 0.28 * t);
+  const rightAt = (t) => 0.5 + (0.07 + 0.28 * t);
+  const dry = scene({ leftAt, rightAt });
+
+  const { img } = scene({ leftAt, rightAt });
+  const data = img.data;
+  for (let y = 0; y < H; y++) {
+    const ny = y / H;
+    if (ny < 0.50 || ny > 0.66) continue;
+    const t = (ny - 0.36) / (1 - 0.36);
+    const x0 = Math.round(leftAt(t) * W);
+    const x1 = Math.round(rightAt(t) * W);
+    for (let x = Math.max(0, x0); x <= Math.min(W - 1, x1); x++) {
+      const i = (y * W + x) * 4;
+      // Bright, near-colourless, and smooth — a mirror of the sky.
+      const v = 236 + (rnd() - 0.5) * 6;
+      data[i] = v; data[i + 1] = v; data[i + 2] = v * 1.01;
+    }
+  }
+
+  const wet = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('the wet road is still traced', wet !== null);
+  if (wet && dry.trace) {
+    check(
+      'the trace spans the water rather than stopping at it',
+      wet.yBot - wet.yTop > (dry.trace.yBot - dry.trace.yTop) * 0.8,
+      `wet span ${(wet.yBot - wet.yTop).toFixed(3)} vs dry ${(dry.trace.yBot - dry.trace.yTop).toFixed(3)}`,
+    );
+    check(
+      'the water is inside the corridor, not outside it',
+      wet.yTop <= 0.50 && wet.yBot >= 0.66,
+      `corridor ${wet.yTop.toFixed(2)}–${wet.yBot.toFixed(2)}, water 0.50–0.66`,
+    );
+  }
+
+  // The other half of the same trade: relaxing brightness must not let a
+  // blown-out sky in, because that is desaturated too.
+  const blown = scene({ leftAt, rightAt });
+  const bd = blown.img.data;
+  for (let y = 0; y < Math.floor(0.36 * H); y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      bd[i] = 255; bd[i + 1] = 255; bd[i + 2] = 255;
+    }
+  }
+  const skyTrace = traceLane(blown.img, DEFAULT_TRACE_OPTIONS);
+  check('a blown-out sky is still excluded', skyTrace !== null && skyTrace.yTop >= 0.36,
+    skyTrace ? `yTop ${skyTrace.yTop.toFixed(3)}` : 'no trace');
+}
+
+// ── Heavy rain: the sky stops being distinguishable ────────────────────
+section('A rain-darkened sky cannot be walked into');
+{
+  // This is the case that broke it, taken from the project's own rain scene:
+  // the horizon read luma 80-122 at saturation 0.15-0.18 while the wet tarmac
+  // below read luma 69. By colour and brightness alone, 99% of that horizon row
+  // *is* asphalt — the two tests the row scan applies cannot separate them.
+  // The scan walked up into the sky and spread across the whole frame,
+  // returning a corridor 0.998 of the frame wide at the top and 0.300 at the
+  // bottom: a road narrower where it is nearest, which cannot happen.
+  const leftAt = (t) => 0.5 - (0.07 + 0.28 * t);
+  const rightAt = (t) => 0.5 + (0.07 + 0.28 * t);
+
+  const data = new Uint8ClampedArray(W * H * 4);
+  const put = (x, y, v) => {
+    const i = (y * W + x) * 4;
+    data[i] = v; data[i + 1] = v; data[i + 2] = v * 1.02; data[i + 3] = 255;
+  };
+
+  for (let y = 0; y < H; y++) {
+    const ny = y / H;
+    for (let x = 0; x < W; x++) {
+      const nx = x / W;
+      if (ny < 0.36) {
+        // Rain-darkened sky: grey, near-colourless, mid-dark. Deliberately
+        // overlapping the wet road's brightness — that is the whole point.
+        put(x, y, 90 + (rnd() - 0.5) * 8);
+        continue;
+      }
+      const t = (ny - 0.36) / 0.64;
+      if (nx >= leftAt(t) && nx <= rightAt(t)) {
+        put(x, y, 74 + (rnd() - 0.5) * 10);
+      } else {
+        const n = (rnd() - 0.5) * 26;
+        const i = (y * W + x) * 4;
+        data[i] = 40 + n; data[i + 1] = 74 + n; data[i + 2] = 34 + n; data[i + 3] = 255;
+      }
+    }
+  }
+
+  const trace = traceLane({ width: W, height: H, data }, DEFAULT_TRACE_OPTIONS);
+
+  // Refusing is an acceptable answer here and so is a correct short corridor.
+  // What is not acceptable is a confident corridor covering the sky.
+  if (trace === null) {
+    check('it refuses rather than tracing the sky', true);
+  } else {
+    check('no part of the corridor is above the horizon', trace.yTop >= 0.34,
+      `yTop ${trace.yTop.toFixed(3)}`);
+    check('the corridor is not the whole frame', trace.meanWidth < 0.75,
+      `meanWidth ${trace.meanWidth.toFixed(3)}`);
+
+    const nearW = trace.right[ROWS - 3] - trace.left[ROWS - 3];
+    const farW = trace.right[2] - trace.left[2];
+    check('it is not inverted — the road is wider at the camera', nearW >= farW * 0.9,
+      `near ${nearW.toFixed(3)} vs far ${farW.toFixed(3)}`);
+  }
+
+  // The same scene with a *bright* sky must still be handled, since that was
+  // the earlier failure and the fix for one must not undo the fix for the other.
+  const bright = new Uint8ClampedArray(data);
+  for (let y = 0; y < Math.floor(0.36 * H); y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      bright[i] = 252; bright[i + 1] = 252; bright[i + 2] = 252;
+    }
+  }
+  const brightTrace = traceLane({ width: W, height: H, data: bright }, DEFAULT_TRACE_OPTIONS);
+  check('a blown-out sky is still kept out',
+    brightTrace === null || brightTrace.yTop >= 0.34,
+    brightTrace ? `yTop ${brightTrace.yTop.toFixed(3)}` : 'refused');
+}
+
+// ── Realistic onboard headcam with front tyres and cockpit ──────────────
+section('Realistic onboard headcam view with wheels and bodywork');
+{
+  const leftAt = (t) => 0.5 - (0.08 + 0.32 * t);
+  const rightAt = (t) => 0.5 + (0.08 + 0.32 * t);
+  const { img } = scene({ leftAt, rightAt, horizon: 0.35 });
+  const data = img.data;
+
+  // Add front wheels (dark rubber) on left and right lower corners
+  for (let y = Math.round(0.55 * H); y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const nx = x / W;
+      const ny = y / H;
+      const i = (y * W + nx * W) * 4;
+      // Left wheel
+      if (nx >= 0.12 && nx <= 0.26 && ny >= 0.55 && ny <= 0.85) {
+        data[i] = 30; data[i + 1] = 30; data[i + 2] = 32;
+      }
+      // Right wheel
+      if (nx >= 0.74 && nx <= 0.88 && ny >= 0.55 && ny <= 0.85) {
+        data[i] = 30; data[i + 1] = 30; data[i + 2] = 32;
+      }
+      // Nosecone in bottom center
+      if (nx >= 0.38 && nx <= 0.62 && ny >= 0.70) {
+        data[i] = 25; data[i + 1] = 95; data[i + 2] = 190; // blue livery
+      }
+    }
+  }
+
+  const headcamTrace = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('the road ahead is traced despite wheels and livery', headcamTrace !== null);
+  if (headcamTrace) {
+    const err = boundaryError(headcamTrace, leftAt, rightAt, 0.35);
+    check('boundaries accurately match the real track', err < 0.045, `mean error ${(err * 100).toFixed(1)}%`);
+    check('corridor stays centered and spans real road width', headcamTrace.meanWidth > 0.20, `meanWidth ${headcamTrace.meanWidth.toFixed(2)}`);
+    const nearCenter = (headcamTrace.left[ROWS - 1] + headcamTrace.right[ROWS - 1]) / 2;
+    check('the map does not jump into either wheel-side gap', Math.abs(nearCenter - 0.5) < 0.08,
+      `near center ${nearCenter.toFixed(2)}`);
+    check('the map stops before the nosecone', headcamTrace.yBot < 0.72,
+      `yBot ${headcamTrace.yBot.toFixed(3)}`);
+  }
+}
+
+section('White track limits separate the course from paved runoff');
+{
+  // The course and runoff are deliberately identical grey asphalt. Only the
+  // solid white limits define the road, matching paved circuits/skidpads where
+  // a surface-colour flood fill cannot possibly find the correct boundary.
+  const leftAt = (t) => 0.48 - (0.07 + 0.22 * t) + 0.07 * t * t;
+  const rightAt = (t) => 0.48 + (0.07 + 0.22 * t) + 0.07 * t * t;
+  const { img } = scene({ leftAt: () => 0, rightAt: () => 1, horizon: 0.35 });
+  const data = img.data;
+  for (let y = Math.round(0.35 * H); y < H; y++) {
+    const t = (y / H - 0.35) / 0.65;
+    for (const bx of [leftAt(t), rightAt(t)]) {
+      const cx = Math.round(bx * W);
+      for (let x = cx - 2; x <= cx + 2; x++) {
+        if (x < 0 || x >= W) continue;
+        const i = (y * W + x) * 4;
+        data[i] = 235; data[i + 1] = 235; data[i + 2] = 235;
+      }
+    }
+  }
+  const trace = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('the marked course is found on same-colour runoff', trace !== null);
+  if (trace) {
+    const err = boundaryError(trace, leftAt, rightAt, 0.35);
+    check('solid track limits stop the trace before runoff', err < 0.055,
+      `mean error ${(err * 100).toFixed(1)}%`);
+  }
+}
+
+section('Neutral carbon bodywork is not mistaken for road');
+{
+  // Road centre swings right while the car stays in the image centre.
+  const leftAt = (t) => 0.5 - (0.07 + 0.30 * t) + 0.12 * t * t;
+  const rightAt = (t) => 0.5 + (0.07 + 0.30 * t) + 0.12 * t * t;
+  const { img } = scene({ leftAt, rightAt, horizon: 0.35 });
+  const data = img.data;
+  const noseTop = Math.round(0.61 * H);
+  for (let y = noseTop; y < H; y++) {
+    const ny = y / H;
+    const half = 0.045 + (ny - 0.61) * 0.36;
+    for (let x = Math.round((0.5 - half) * W); x <= Math.round((0.5 + half) * W); x++) {
+      const i = (y * W + x) * 4;
+      const v = 34 + ((x + y) % 5);
+      data[i] = v; data[i + 1] = v; data[i + 2] = v;
+    }
+  }
+  const trace = traceLane(img, DEFAULT_TRACE_OPTIONS);
+  check('road above a grey/black nose is found', trace !== null);
+  if (trace) check('the trace stops before neutral bodywork', trace.yBot < 0.64,
+    `yBot ${trace.yBot.toFixed(3)}`);
+}
+
+console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m\n`);
+process.exit(failed === 0 ? 0 : 1);

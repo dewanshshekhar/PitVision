@@ -3,6 +3,9 @@ import { slope } from '../util/math';
 import { normaliseSignals, wetnessIndex, type Calibration } from './calibration';
 import { ConditionClassifier } from './classify';
 import { analyseFrame, toSignals } from './metrics';
+import { LaneTracker, type LaneStatus } from './lane';
+import { SegmentationClient } from './segclient';
+import { corridorFromRoad, corridorFromTrace, type Corridor } from './rois';
 
 /** Anything that can be drawn into a canvas: a <video> or the synthetic scene. */
 export interface FrameSource {
@@ -59,6 +62,32 @@ export class CvEngine {
   /** Called immediately before each analysis pass — used to advance a generated feed. */
   beforeTick: (() => void) | null = null;
 
+  /**
+   * Finds the road and follows it.
+   *
+   * Rate-limited internally, so this costs a fraction of a millisecond per
+   * frame amortised. It supplies the current-frame motion used to propagate
+   * neural keyframes between sidecar responses.
+   */
+  readonly lane = new LaneTracker();
+
+  /**
+   * Optional neural road segmentation, when a sidecar is installed.
+   *
+   * Sits above the geometric tracer rather than replacing it. A network trained
+   * on real driving footage finds the road through spray, at night and across
+   * patched tarmac far better than a heuristic can — but it is optional
+   * infrastructure, and a detector that stops working when a Python process is
+   * not running would be a worse detector than the one it replaced.
+   */
+  readonly segmenter = new SegmentationClient();
+
+  /** The corridor the last pass actually measured through. */
+  lastCorridor: Corridor | null = null;
+
+  /** Which of the three sources produced it. */
+  lastCorridorSource: 'segmentation' | 'traced' | 'manual' = 'manual';
+
   private ema: { road?: number; line?: number; edge?: number } = {};
   private classifier: ConditionClassifier;
 
@@ -97,11 +126,30 @@ export class CvEngine {
   setSource(s: FrameSource) {
     this.source = s;
     this.resetSmoothing();
+    // The previous corridor described a different road. Carrying it over would
+    // measure the new feed through the old feed's geometry.
+    this.lane.reset();
+    this.segmenter.reset();
   }
 
   setCalibration(c: Calibration) {
+    const wasAuto = this.cal?.laneAuto;
     this.cal = c;
     this.classifier.setCalibration(c);
+    // Tracer thresholds ride along with the calibration object so presets
+    // persist and the real-time calibration can tighten them as it measures.
+    // Written to the tracker's mutable options — the next natural retrace
+    // picks them up, without forcing a visible corridor jump.
+    this.lane.options.maxSat = c.traceMaxSat;
+    this.lane.options.lumaTolerance = c.traceLumaTolerance;
+    // Re-trace immediately when automatic tracing is switched back on, rather
+    // than leaving the readout on the manual ROI until the next interval.
+    if (c.laneAuto && !wasAuto) this.lane.invalidate();
+  }
+
+  /** Where the lane tracer currently thinks the road is. */
+  get laneStatus(): LaneStatus {
+    return this.lane.status;
   }
 
   onReading(fn: (r: Reading, m: FrameMetrics) => void) {
@@ -249,7 +297,41 @@ export class CvEngine {
       return null; // frame not decodable yet
     }
     const img = this.ctx.getImageData(0, 0, this.sampleW, this.sampleH);
-    const metrics = analyseFrame(img, this.cal.road, { v: this.cal.glareV, s: this.cal.glareS });
+
+    // Find the road, then measure through whatever found it.
+    //
+    // Three sources, in order of how much they know, each falling back to the
+    // next. Nothing here can leave the detector without a region: the manual
+    // trapezoid is always available, which is what makes the two automatic
+    // sources safe to depend on.
+    //
+    //   1. Segmentation — a network trained on real driving footage. Optional,
+    //      asked a few times a second, absent on most installs.
+    //   2. Geometric tracing — in-browser, always available, half a millisecond.
+    //   3. The hand-placed trapezoid — the answer for a camera neither can
+    //      read, and an override an operator who has aimed it deliberately
+    //      should not have taken away from them.
+    let corridor: Corridor;
+    if (!this.cal.laneAuto) {
+      corridor = corridorFromRoad(this.cal.road);
+      this.lastCorridorSource = 'manual';
+    } else {
+      const traced = this.lane.update(img);
+      const segmented = this.segmenter.update(() => this.snapshot(640, 0.7), traced);
+      if (segmented) {
+        corridor = corridorFromTrace(segmented);
+        this.lastCorridorSource = 'segmentation';
+      } else if (traced) {
+        corridor = corridorFromTrace(traced);
+        this.lastCorridorSource = 'traced';
+      } else {
+        corridor = corridorFromRoad(this.cal.road);
+        this.lastCorridorSource = 'manual';
+      }
+    }
+    this.lastCorridor = corridor;
+
+    const metrics = analyseFrame(img, corridor, { v: this.cal.glareV, s: this.cal.glareS });
     metrics.ms = performance.now() - t0;
     return metrics;
   }
@@ -331,6 +413,7 @@ export class CvEngine {
       signals: roadSignals,
       normalised: normaliseSignals(roadSignals, this.cal),
       ms: metrics.ms,
+      ...(countLatency ? { endToEndMs: endToEnd } : {}),
     };
 
     this.lastReading = reading;

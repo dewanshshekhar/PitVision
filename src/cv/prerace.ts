@@ -5,8 +5,14 @@ type FrameMetricsLike = Pick<FrameMetrics, 'road'>;
 import type { Calibration } from './calibration';
 import type { RoadGeometry } from './rois';
 import type { SourceManager } from '../source/manager';
-import { autoCalibrateClip, autoCalibrateLive, applyReport, type AutoCalReport } from './autocal';
+import {
+  autoCalibratePlayback,
+  applyReport,
+  type AutoCalReport,
+  type LiveCalUpdate,
+} from './autocal';
 import { warmUp } from './metrics';
+import { warmUpLane } from './lane';
 import { wetnessIndex, inertSignals } from './calibration';
 import { toSignals } from './metrics';
 
@@ -28,6 +34,45 @@ export interface PreRaceResult {
 
 export type CheckListener = (checks: Check[]) => void;
 
+export interface PreRaceOptions {
+  calibrate?: boolean;
+  /**
+   * Called whenever anchors are refined *after* the check returned — any feed,
+   * clip or live.
+   *
+   * Calibration now runs for the whole footage rather than finishing inside
+   * the check: the check hands back usable anchors as soon as they exist so
+   * the readout starts, then this callback receives every refinement as the
+   * scale tightens under a readout that never stopped.
+   */
+  onRefine?: (calibration: Calibration, update: LiveCalUpdate) => void;
+  /**
+   * Pre-warm seed from /calibration.json (offline calibrate.py output).
+   *
+   * Applied immediately, before the watch starts, so even its first samples
+   * sit on measured numbers. The watch then replaces the seed with anchors
+   * measured on *this* feed and stamps them with its signature.
+   */
+  seed?: Partial<Calibration>;
+}
+
+/**
+ * Cancels the background watch left running by a previous check.
+ *
+ * Without this, loading a second feed leaves the first one's watch sampling the
+ * new footage and overwriting its anchors from behind — the calibration would
+ * be a blend of two different roads with nothing on screen to say so.
+ */
+let liveWatch: { aborted: boolean } | null = null;
+
+/**
+ * How long the check waits for the first usable anchors before handing back.
+ *
+ * Calibration continues in the background either way; this only bounds how
+ * long the check itself blocks on footage that never shows road.
+ */
+const WARMUP_GIVE_UP_MS = 15000;
+
 /**
  * Find the tarmac automatically.
  *
@@ -48,45 +93,47 @@ export function findRoad(engine: CvEngine, cal: Calibration): RoadGeometry | nul
   let best: { road: RoadGeometry; score: number } | null = null;
 
   // Candidate bands: where the road sits vertically, and how wide it is.
-  for (const yTop of [0.28, 0.34, 0.40, 0.46, 0.52, 0.58, 0.64]) {
-    for (const height of [0.08, 0.13, 0.2, 0.3]) {
+  for (const yTop of [0.32, 0.36, 0.40, 0.45, 0.50]) {
+    for (const height of [0.20, 0.28, 0.36]) {
       const yBot = yTop + height;
-      if (yBot > 0.98) continue;
-      for (const halfWidth of [0.09, 0.15, 0.24]) {
-        const road: RoadGeometry = {
-          yTop,
-          yBot,
-          xTopL: 0.5 - halfWidth * 0.62,
-          xTopR: 0.5 + halfWidth * 0.62,
-          xBotL: 0.5 - halfWidth,
-          xBotR: 0.5 + halfWidth,
-        };
-        cal.road = road;
-        const m = engine.probe();
-        if (!m || m.road.pixels < 350) continue;
+      if (yBot > 0.86) continue;
+      for (const cx of [0.50, 0.44, 0.56]) {
+        for (const halfWidth of [0.18, 0.26, 0.34]) {
+          const road: RoadGeometry = {
+            yTop,
+            yBot,
+            xTopL: Math.max(0.05, cx - halfWidth * 0.45),
+            xTopR: Math.min(0.95, cx + halfWidth * 0.45),
+            xBotL: Math.max(0.02, cx - halfWidth),
+            xBotR: Math.min(0.98, cx + halfWidth),
+          };
+          cal.road = road;
+          const m = engine.probe();
+          if (!m || m.road.pixels < 350) continue;
 
-        const b = m.road;
-        // Grey wins. Mid-brightness wins. Featureless wins nothing.
-        const greyness = 1 - Math.min(1, b.sat / 0.35);
-        const brightness = 1 - Math.min(1, Math.abs(b.luma - 118) / 118);
-        const alive = b.texture > 25 ? 1 : 0.15;
-        const score = greyness * 0.6 + brightness * 0.3 + alive * 0.1;
-        if (!best || score > best.score) best = { road, score };
+          const b = m.road;
+          // Grey wins. Mid-brightness wins. Featureless wins nothing.
+          const greyness = 1 - Math.min(1, b.sat / 0.30);
+          const brightness = 1 - Math.min(1, Math.abs(b.luma - 118) / 118);
+          const alive = b.texture > 20 ? 1 : 0.15;
+          const score = greyness * 0.6 + brightness * 0.3 + alive * 0.1;
+          if (!best || score > best.score) best = { road, score };
+        }
       }
     }
   }
 
   cal.road = original;
   // Below this the frame simply does not contain an obvious road surface.
-  return best && best.score > 0.55 ? best.road : null;
+  return best && best.score > 0.52 ? best.road : null;
 }
 
 /**
  * The pre-race check.
  *
- * Everything expensive, seekable, allocating or network-bound happens here,
- * before the session starts — decode, ROI validation, a full-clip calibration
- * sweep, buffer warm-up, a timed throughput probe, and the verification
+ * Everything expensive, allocating or network-bound happens here, before the
+ * session starts — decode, ROI validation, the start of the real-time
+ * calibration, buffer warm-up, a timed throughput probe, and the verification
  * proxy handshake. Once this passes, the live loop does nothing but read
  * pixels out of pre-allocated arrays, so the readout has no reason to stall
  * mid-session.
@@ -99,8 +146,9 @@ export async function runPreRaceCheck(
   engine: CvEngine,
   cal: Calibration,
   onUpdate: CheckListener,
-  opts: { calibrate?: boolean; checkProxy?: boolean } = {},
+  opts: PreRaceOptions & { checkProxy?: boolean } = {},
 ): Promise<PreRaceResult> {
+  const options = opts;
   const calibrate = opts.calibrate ?? true;
   const checkProxy = opts.checkProxy ?? true;
 
@@ -108,7 +156,7 @@ export async function runPreRaceCheck(
     { id: 'feed', label: 'Feed decodes', state: 'pending', detail: '' },
     { id: 'roi', label: 'ROI on track surface', state: 'pending', detail: '' },
     { id: 'bands', label: 'Edge bands see the same surface', state: 'pending', detail: '' },
-    { id: 'calib', label: 'Calibration sweep', state: 'pending', detail: '' },
+    { id: 'calib', label: 'Real-time calibration', state: 'pending', detail: '' },
     { id: 'range', label: 'Signal spread across clip', state: 'pending', detail: '' },
     { id: 'warm', label: 'Buffers warmed', state: 'pending', detail: '' },
     { id: 'speed', label: 'Throughput', state: 'pending', detail: '' },
@@ -135,18 +183,49 @@ export async function runPreRaceCheck(
   const dur = source.seekable ? ` · ${source.videoDuration.toFixed(1)}s` : '';
   set('feed', 'pass', `${source.width}×${source.height}${dur}`);
 
-  // 2 — ROI actually lands on road.
+  // 2 — The region actually lands on road.
   //
-  //     The default assumes a trackside camera. If the current ROI is not
-  //     looking at anything grey, the frame is searched for tarmac and the ROI
-  //     is moved — otherwise onboard footage silently gets measured on the car.
-  set('roi', 'running', 'locating tarmac…');
+  //     With tracing on, this is a check rather than a search: the tracer has
+  //     already located the road and is following it, and the job here is to
+  //     confirm it locked on before the session starts, not to place a shape.
+  //     With tracing off, the old grid search still positions the hand-placed
+  //     trapezoid — otherwise onboard footage silently gets measured on the car.
+  // Ask once whether a segmentation sidecar is installed. Whether a model is
+  // present is a property of the deployment, not something that changes mid
+  // session, so this belongs here and not on a timer.
+  if (cal.laneAuto) await engine.segmenter.probe();
+
+  set('roi', 'running', cal.laneAuto ? 'tracing the road…' : 'locating tarmac…');
   let probe = engine.probe();
   const looksLikeRoad = (m: FrameMetricsLike | null) =>
     !!m && m.road.pixels >= 400 && m.road.sat < 0.2 && m.road.luma > 25 && m.road.luma < 215;
 
   let moved = false;
-  if (!looksLikeRoad(probe)) {
+  let traced = false;
+
+  if (cal.laneAuto) {
+    // Give the tracer a few frames to settle. It rate-limits itself, so a
+    // single probe would usually be the very first attempt.
+    for (let i = 0; i < 6 && !engine.lane.trace; i++) {
+      engine.lane.invalidate();
+      probe = engine.probe();
+    }
+    traced = engine.lane.trace !== null;
+
+    if (!traced) {
+      // The tracer found nothing road-like. Rather than run without a region,
+      // fall back to the search that placed the fixed trapezoid, and say so —
+      // a corridor that could not be traced is exactly the case where someone
+      // needs to look at the overlay themselves.
+      const found = findRoad(engine, cal);
+      if (found) {
+        cal.road = found;
+        calibration = { ...cal, road: found };
+        probe = engine.probe();
+        moved = true;
+      }
+    }
+  } else if (!looksLikeRoad(probe)) {
     const found = findRoad(engine, cal);
     if (found) {
       cal.road = found;
@@ -157,18 +236,29 @@ export async function runPreRaceCheck(
   }
 
   if (!probe || probe.road.pixels < 400) {
-    set('roi', 'fail', `Only ${probe?.road.pixels ?? 0} px inside the ROI. Use Edit ROI and drag the corners onto the tarmac.`);
+    set('roi', 'fail', `Only ${probe?.road.pixels ?? 0} px inside the region. Use Edit ROI and drag the corners onto the tarmac.`);
     return { checks, calibration, report, ok: false };
   }
   if (!looksLikeRoad(probe)) {
     set('roi', 'warn',
-      `ROI does not look like tarmac (saturation ${probe.road.sat.toFixed(2)}, brightness ` +
-      `${probe.road.luma.toFixed(0)}) and no better region was found. It is probably on the car, ` +
+      `The sampled region does not look like tarmac (saturation ${probe.road.sat.toFixed(2)}, brightness ` +
+      `${probe.road.luma.toFixed(0)}) and no better one was found. It is probably on the car, ` +
       `sky or grass — use Edit ROI. Readings until then are meaningless.`);
   }
   const linePx = probe.line.pixels;
   const edges = probe.left.pixels + probe.right.pixels;
-  const where = moved ? 'ROI moved onto tarmac automatically · ' : '';
+
+  const seg = engine.segmenter.state;
+  const lane = engine.lane.trace;
+  const where = seg.state === 'live'
+    ? `road segmented by model · limits from ${seg.limitsFrom ?? 'mask edge'} · `
+    : traced && lane
+    ? `road traced · ${(lane.meanWidth * 100).toFixed(0)}% of frame width · ` +
+      `${(lane.confidence * 100).toFixed(0)}% of rows measured · `
+    : moved
+      ? 'no lane traced, fixed ROI placed automatically · '
+      : '';
+
   if (looksLikeRoad(probe)) {
     if (linePx < 150 || edges < 150) {
       set('roi', 'warn', `${where}thin bands (line ${linePx} px, edges ${edges} px). Divergence will be noisy.`);
@@ -211,20 +301,80 @@ export async function runPreRaceCheck(
       `brightness Δ${worst.luma.toFixed(0)}). Drying detection enabled.`);
   }
 
-  // 3 — Calibration sweep across the whole clip.
+  // 3 — Calibration.
+  //
+  //     One path for every feed. The clip path used to pause playback and
+  //     seek-scan forty sampled frames; a live feed was watched for a fixed
+  //     twenty seconds instead. Both are replaced by the same progressive
+  //     watch over the footage as it plays: usable anchors are handed back as
+  //     soon as they exist, and refinement continues through onRefine for the
+  //     whole session. A reading from second two says it is provisional rather
+  //     than pretending otherwise — see autoCalibratePlayback.
   if (calibrate) {
-    set('calib', 'running', 'scanning clip…');
-    try {
-      report = source.seekable
-        ? await autoCalibrateClip(source.video, engine, 40, (d, t) =>
-            set('calib', 'running', `frame ${d}/${t}`))
-        : await autoCalibrateLive(engine, 20, (d, t) =>
-            set('calib', 'running', `sample ${d}/${t}`));
-      calibration = { ...applyReport(cal, report), divergenceReliable, signature: source.signature };
-      set('calib', report.confident ? 'pass' : 'warn', report.note);
-    } catch (err) {
-      set('calib', 'warn', err instanceof Error ? err.message : String(err));
+    // A previous feed's watch must not survive into this one, or it would keep
+    // sampling the new footage and overwriting its anchors from behind — a
+    // blend of two different roads with nothing on screen to say so.
+    if (liveWatch) liveWatch.aborted = true;
+    const watch = { aborted: false };
+    liveWatch = watch;
+
+    let seededNote = '';
+    if (opts.seed) {
+      cal = { ...cal, ...opts.seed };
+      calibration = { ...cal, divergenceReliable, signature: source.signature };
+      seededNote = 'Pre-warmed from calibration.json. ';
+      set('calib', 'running', 'pre-warmed — refining on this footage…');
+    } else {
+      set('calib', 'running', 'watching footage…');
     }
+
+    report = await new Promise<AutoCalReport | null>((resolve) => {
+      let handedBack = false;
+
+      // If no usable anchors ever arrive — ROI off the road, feed stopped —
+      // unblock anyway rather than hang the check. The background watch keeps
+      // running so refinements still land once road appears.
+      const giveUp = window.setTimeout(() => {
+        if (!handedBack) {
+          handedBack = true;
+          resolve(null);
+        }
+      }, WARMUP_GIVE_UP_MS);
+
+      void autoCalibratePlayback(
+        engine,
+        (u) => {
+          if (u.stage === 'warming') {
+            set('calib', 'running', seededNote + u.note);
+            return;
+          }
+
+          const next: Calibration = {
+            ...applyReport(cal, u.report),
+            ...(u.report.tracer
+              ? {
+                  traceMaxSat: u.report.tracer.maxSat,
+                  traceLumaTolerance: u.report.tracer.lumaTolerance,
+                }
+              : {}),
+            divergenceReliable,
+            signature: source.signature,
+          };
+          set('calib', u.stage === 'settled' ? 'pass' : 'warn', seededNote + u.note);
+
+          if (!handedBack) {
+            handedBack = true;
+            window.clearTimeout(giveUp);
+            calibration = next;
+            resolve(u.report);
+          } else if (!watch.aborted) {
+            // The check has already returned; push refinements to the app.
+            options.onRefine?.(next, u);
+          }
+        },
+        { signal: watch },
+      );
+    });
   } else {
     calibration = { ...cal, divergenceReliable };
     set('calib', 'pass', 'Skipped — using existing anchors.');
@@ -261,8 +411,11 @@ export async function runPreRaceCheck(
   // 5 — Pre-allocate everything the hot loop touches.
   set('warm', 'running', 'allocating…');
   warmUp(engine.sampleWidth, engine.sampleHeight || 216);
+  // The tracer has its own buffers and they are allocated on its first trace,
+  // which would otherwise land in the middle of a live session.
+  warmUpLane(engine.sampleWidth, engine.sampleHeight || 216);
   for (let i = 0; i < 5; i++) engine.probe();
-  set('warm', 'pass', 'Analysis buffers allocated and touched.');
+  set('warm', 'pass', 'Analysis and lane-tracing buffers allocated and touched.');
 
   // 6 — Timed throughput on this machine, with this footage.
   //

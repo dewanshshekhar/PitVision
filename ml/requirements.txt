@@ -1,0 +1,13 @@
+# Inference — what the garage machine needs.
+#
+# No PyTorch. The model arrives as ONNX and ONNX Runtime executes it, which is a
+# ~25 MB wheel rather than a ~900 MB one, and the same file runs on CPU, CUDA,
+# OpenVINO or an NPU without a code change.
+onnxruntime>=1.17
+numpy>=1.24
+opencv-python-headless>=4.8
+onnx>=1.16  # builds the fixture graphs used by npm run test:ml
+
+# Setup and training only — install separately, not on the race machine:
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu

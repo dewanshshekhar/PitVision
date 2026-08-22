@@ -8,6 +8,7 @@ import { SCENARIO_LENGTH } from './source/synthetic';
 import { suggest } from './strategy/suggest';
 import { Verifier } from './ai/verify';
 import { runPreRaceCheck, type Check } from './cv/prerace';
+import { loadPreWarmSeed } from './cv/prewarm';
 import { AlertFeed } from './ui/alerts';
 import { Overlay } from './ui/overlay';
 import { TrendChart } from './ui/trend';
@@ -16,6 +17,7 @@ import { ParticleField } from './ui/particles';
 import { buildCalibrationPanel } from './ui/panels';
 import { estimateLap, formatLap, formatDelta } from './strategy/lapdelta';
 import { loadEntrant, saveEntrant, renderEntrant, type Entrant } from './ui/entrant';
+import { Telemetry } from './telemetry/client';
 import { $, el, toast } from './util/dom';
 
 // ── State ──────────────────────────────────────────────────────────────
@@ -26,6 +28,9 @@ const source = new SourceManager();
 // without frame callbacks stays around 60 ms rather than 95 ms.
 const engine = new CvEngine(source, cal, { sampleWidth: 384, hz: 20 });
 const verifier = new Verifier();
+// Recording is additive: if the backend is unreachable every call here is a
+// no-op and the detector runs exactly as it did before.
+const telemetry = new Telemetry();
 
 const stage = $('#stage');
 const overlay = new Overlay($<HTMLCanvasElement>('#overlay'));
@@ -228,14 +233,48 @@ const ui = {
   trendRate: $('#trend-rate'),
 };
 
+/**
+ * Short code for the tyre badge.
+ *
+ * A map rather than a ternary chain, because the chain silently blanked every
+ * string it did not name — and the one it missed was `Slick (marginal)`, which
+ * is the *greasy* call: the single condition where the compound choice is
+ * genuinely close and a strategist most needs to be told "slicks, but only
+ * just". The badge went empty on exactly the frames that mattered.
+ *
+ * `SLK*` rather than `SLK` for that case, so a marginal call cannot be read at
+ * a glance as a settled one. Anything unmapped falls back to the first three
+ * letters, which is wrong-looking rather than invisible — a missing badge reads
+ * as "no data", and being loud about an unmapped string is how it gets fixed.
+ */
+const TYRE_CODE: Record<string, string> = {
+  'Slicks': 'SLK',
+  'Slick': 'SLK',
+  'Slick (marginal)': 'SLK*',
+  'Intermediate': 'INT',
+  'Full wet': 'WET',
+  '—': '—',
+};
+
 let lastReading: Reading | null = null;
 let ticksThisSecond = 0;
 let rateWindow = performance.now();
 
 function applyReading(r: Reading, _m: FrameMetrics) {
+  const previousCondition = lastReading?.condition;
   lastReading = r;
   ticksThisSecond++;
   alerts.observe(r, cal);
+  const laneStatus = engine.laneStatus;
+  telemetry.setLane(
+    cal.laneAuto ? laneStatus.state : 'manual',
+    laneStatus.trace?.confidence ?? 0,
+  );
+  telemetry.observe(r, r.endToEndMs);
+  syncLanePill();
+  // A condition change is what a second screen is waiting for, so it goes out
+  // now rather than on the next flush.
+  if (previousCondition && previousCondition !== r.condition) telemetry.observeConditionChange();
 
   const lap = estimateLap(baselineLap, r.condition);
   $('#lap-projected').textContent = formatLap(lap.seconds);
@@ -309,7 +348,7 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   }
 
   const s = suggest(r);
-  ui.tyre.textContent = s.tyre === 'Intermediate' ? 'INT' : s.tyre === 'Full wet' ? 'WET' : s.tyre === 'Slicks' ? 'SLK' : '—';
+  ui.tyre.textContent = TYRE_CODE[s.tyre] ?? s.tyre.slice(0, 3).toUpperCase();
   ui.call.textContent = s.call;
   ui.detail.textContent = s.detail;
   ui.urgency.textContent = s.urgency;
@@ -326,6 +365,9 @@ function frame(t: number) {
   lastFrameAt = performance.now();
   source.pump();
 
+  // Draw the region the detector actually measured, not the one in the
+  // calibration — with tracing on, those are different shapes.
+  overlay.corridor = engine.lastCorridor;
   overlay.draw(engine.lastMetrics, cal, source.width, source.height);
   particles.draw(lastReading?.wetness ?? 0);
 
@@ -376,17 +418,125 @@ engine.start();
 // Exposed for calibration work and for poking at the pipeline from the console.
 Object.assign(window, {
   pitvision: {
-    engine, source, verifier, overlay, chart, strip, particles, alerts,
+    engine, source, verifier, telemetry, overlay, chart, strip, particles, alerts,
     get cal() { return cal; },
     /** Force a repaint of every canvas layer. */
     repaint() {
-      overlay.draw(engine.lastMetrics, cal, source.width, source.height);
+      // Draw the region the detector actually measured, not the one in the
+  // calibration — with tracing on, those are different shapes.
+  overlay.corridor = engine.lastCorridor;
+  overlay.draw(engine.lastMetrics, cal, source.width, source.height);
       particles.draw(engine.lastReading?.wetness ?? 0);
       chart.draw(engine.history, cal, CONDITION_COLOUR[engine.lastReading?.condition ?? 'Dry']);
       strip.draw(engine.history);
     },
   },
 });
+
+// ── Session recording ──────────────────────────────────────────────────
+//
+// The session is scoped to one feed. Loading a different clip closes the
+// previous session rather than continuing it: the calibration anchors change
+// with the footage, and a series scored against two sets of anchors is not one
+// series.
+
+const sessionPill = $('#pill-session');
+const sessionLabel = $('#session-label');
+
+// ── Lane trace state ───────────────────────────────────────────────────
+//
+// The corridor the detector measures through is found automatically and can
+// fail to find anything — a camera on the pit garage, a feed that has cut to a
+// studio shot. That has to be visible, because the alternative is a readout
+// that looks identical whether it is measuring tarmac or a wall.
+const lanePill = $('#pill-lane');
+const laneLabel = $('#lane-label');
+
+function syncLanePill() {
+  if (!cal.laneAuto) {
+    lanePill.className = 'pill';
+    lanePill.title = 'Automatic tracing off — measuring through the hand-placed ROI';
+    laneLabel.textContent = 'manual';
+    return;
+  }
+  const seg = engine.segmenter.state;
+  if (engine.lastCorridorSource === 'segmentation' && seg.state === 'live') {
+    lanePill.className = 'pill';
+    lanePill.title = `${seg.message} · ${seg.latencyMs} ms round trip`;
+    laneLabel.textContent = 'segmented';
+    return;
+  }
+
+  const { state, trace, lastCostMs } = engine.laneStatus;
+  if (state === 'locked' && trace) {
+    lanePill.className = 'pill';
+    lanePill.title =
+      `Road traced: ${(trace.meanWidth * 100).toFixed(0)}% of frame width, ` +
+      `${(trace.confidence * 100).toFixed(0)}% of rows measured, ${lastCostMs.toFixed(2)} ms per trace`;
+    laneLabel.textContent = `traced ${(trace.confidence * 100).toFixed(0)}%`;
+  } else {
+    lanePill.className = 'pill warn-pill';
+    lanePill.title =
+      state === 'lost'
+        ? 'Lost the road — measuring through the last known region. Check the overlay.'
+        : 'Looking for the road surface.';
+    laneLabel.textContent = state === 'lost' ? 'lost' : 'searching';
+  }
+}
+
+telemetry.onChange((s) => {
+  sessionPill.hidden = s.status === 'off' && !s.sessionId;
+  sessionPill.className = `pill${s.status === 'retrying' ? ' warn-pill' : ''}`;
+  sessionPill.title = s.message;
+  sessionLabel.textContent =
+    s.status === 'live'
+      ? `rec ${s.sent}`
+      : s.status === 'retrying'
+        ? `queued ${s.queued}`
+        : s.status === 'connecting'
+          ? 'opening…'
+          : 'off';
+});
+
+alerts.onPush = (a) => telemetry.event(a);
+
+// The backend watches the detector while it runs. What it finds has to arrive
+// where the strategist is already looking, or the watching was pointless.
+telemetry.onIncident = (incident, state) => {
+  if (state === 'closed') {
+    alerts.push({
+      kind: 'monitor',
+      level: 'info',
+      title: `Cleared — ${incident.summary}`,
+      detail: `Held for ${(((incident.closed_at ?? Date.now()) - incident.opened_at) / 1000).toFixed(0)}s.`,
+    });
+    return;
+  }
+  alerts.push({
+    kind: 'monitor',
+    level: incident.severity === 'critical' ? 'critical' : 'warn',
+    title: incident.summary,
+    detail: incident.detail ?? 'Raised by the backend monitor.',
+  });
+};
+
+/** Open a recording session for whatever feed is now loaded. */
+async function startRecording() {
+  if (source.kind === 'none') return;
+  const id = await telemetry.start({
+    kind: source.kind,
+    label: source.label,
+    signature: source.signature,
+    entrant,
+    baselineLapS: baselineLap,
+  });
+  verifier.sessionId = id;
+  if (id) toast(`Recording session ${id.slice(0, 12)}`);
+}
+
+// The tab going away must close the session, or its report would carry the
+// server's whole idle timeout as silence on the end.
+window.addEventListener('pagehide', () => telemetry.endOnUnload());
 
 // ── AI verification ────────────────────────────────────────────────────
 const verifyUi = {
@@ -483,12 +633,23 @@ async function preRace(calibrate = true) {
   verdict.className = 'tag';
   verdict.textContent = 'running…';
 
-  // The engine must stand still while the check seeks around the clip,
-  // otherwise it records the scan itself as a wild condition swing.
-  engine.stop();
-  source.seeking = true;
+  // Nothing here pauses playback or seeks any more — calibration watches the
+  // footage as it plays, and every probe the check makes bypasses session
+  // history, so there is nothing to isolate the readout from.
   try {
-    const result = await runPreRaceCheck(source, engine, cal, renderChecks, { calibrate });
+    const result = await runPreRaceCheck(source, engine, cal, renderChecks, {
+      calibrate,
+      // Calibration runs for the whole footage now: usable anchors arrive
+      // within seconds and keep being refined. Each refinement is applied as
+      // it lands, so the scale tightens under a readout that never stopped.
+      onRefine: (refined) => {
+        cal = refined;
+        engine.setCalibration(cal);
+        saveCalibration(cal);
+        calPanel.syncAll();
+        syncCalibrationBanner();
+      },
+    });
     if (result.calibration) {
       cal = result.calibration;
       engine.setCalibration(cal);
@@ -503,6 +664,17 @@ async function preRace(calibrate = true) {
         : 'pass';
     verdict.className = `tag ${worst}`;
     verdict.textContent = worst === 'pass' ? 'ready' : worst === 'warn' ? 'ready, with notes' : 'not ready';
+    // Store the anchors alongside the outcome. A disputed reading is almost
+    // always a disputed calibration, and without them a recorded wetness of 62
+    // is a number with no units.
+    void telemetry.calibration({
+      ok: worst !== 'fail',
+      checks: result.checks,
+      verdict: worst,
+      anchoring: result.report?.branch ?? null,
+      cal,
+      signature: source.signature,
+    });
     alerts.push({
       kind: 'system',
       level: worst === 'fail' ? 'critical' : 'info',
@@ -512,10 +684,9 @@ async function preRace(calibrate = true) {
         : result.checks.find((c) => c.state === 'fail')?.detail ?? 'Pipeline warm and inside budget.',
     });
   } finally {
-    source.seeking = false;
-    engine.clearHistory();
+    // The engine was never stopped, so there is nothing to restart — and the
+    // history recorded during the check is real footage, not scan artefacts.
     alerts.suppress(1200);
-    engine.start();
     checkRunning = false;
     btn.disabled = btn2.disabled = false;
   }
@@ -544,6 +715,7 @@ function useGeneratedScene(view: 'onboard' | 'trackside' = 'onboard') {
   engine.clearHistory();
   alerts.clear();
   syncPlayButton();
+  void startRecording();
   $('#btn-synthetic').setAttribute('aria-pressed', String(view === 'onboard'));
   $('#btn-trackside').setAttribute('aria-pressed', String(view === 'trackside'));
   toast(
@@ -566,6 +738,9 @@ async function adoptFootage(load: () => Promise<void>, name: string) {
     alerts.clear();
     syncPlayButton();
     toast(`${name} loaded — running pre-race check`);
+    // Before the check, so its outcome and anchors land in this session
+    // rather than in whatever was open beforehand.
+    await startRecording();
     await preRace(true);
   } catch (err) {
     toast(err instanceof Error ? err.message : String(err));
@@ -682,6 +857,21 @@ window.setInterval(() => {
   const panel = document.getElementById('cal-panel') as HTMLDetailsElement | null;
   if (panel?.open) calPanel.refreshAnchors();
 }, 700);
+
+// ── Pre-warm ───────────────────────────────────────────────────────────
+// An offline calibration from ml/scripts/calibrate.py, served at
+// /calibration.json, seeds the anchors once at startup so the very first
+// readings sit on measured numbers instead of synthetic-scene defaults. The
+// real-time calibration refines from there on whatever footage loads. Absent
+// file: silent no-op — that is the normal case, not an error.
+void loadPreWarmSeed().then((seed) => {
+  if (!seed) return;
+  cal = { ...cal, ...seed, signature: '' };
+  engine.setCalibration(cal);
+  saveCalibration(cal);
+  calPanel.syncAll();
+  toast('Pre-warm calibration loaded from /calibration.json');
+});
 
 // ── Keyboard shortcuts (demo ergonomics) ───────────────────────────────
 window.addEventListener('keydown', (e) => {

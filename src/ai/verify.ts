@@ -1,4 +1,4 @@
-import type { Condition, Reading, Verification } from '../types';
+import type { AgreementLevel, Condition, Reading, Verification } from '../types';
 
 export type VerifyStatus = 'idle' | 'checking' | 'ok' | 'offline' | 'error';
 
@@ -71,6 +71,14 @@ export class Verifier {
     }
   }
 
+  /**
+   * Session the verifications belong to, so the backend can file them against
+   * the run and compute an agreement rate over it. Null when no session is
+   * open — a verification with nowhere to belong is still worth performing, it
+   * just does not count toward anything.
+   */
+  sessionId: string | null = null;
+
   async verify(image: string, reading: Reading): Promise<Verification | null> {
     if (this.inFlight) return null;
     this.inFlight = true;
@@ -84,6 +92,7 @@ export class Verifier {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           image,
+          sessionId: this.sessionId,
           cv: {
             condition: reading.condition,
             wetness: Math.round(reading.wetness),
@@ -113,13 +122,23 @@ export class Verifier {
         confidence: number;
         reasoning: string;
         model?: string;
+        agreement?: AgreementLevel | null;
+        agrees?: boolean;
       };
 
       const v: Verification = {
         condition: body.condition,
         confidence: body.confidence,
         reasoning: body.reasoning,
-        agrees: body.condition === reading.condition,
+        // The grade comes from the server, which knows the full condition
+        // vocabulary. Comparing the two strings here was wrong: the model's
+        // enum used to be a subset of the engine's, so a frame the engine
+        // called Sunny, Greasy or Flooded was reported as a disagreement by
+        // construction — the model had no way to spell the word it was being
+        // compared against. Older servers omit the field; the string compare
+        // is kept as the fallback for those.
+        agrees: body.agrees ?? body.condition === reading.condition,
+        agreement: body.agreement ?? null,
         cvCondition: reading.condition,
         at: Date.now(),
         model: body.model,

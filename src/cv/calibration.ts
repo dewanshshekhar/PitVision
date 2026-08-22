@@ -1,6 +1,7 @@
 import type { Signals } from '../types';
 import { clamp, normalise } from '../util/math';
 import { DEFAULT_ROAD, type RoadGeometry } from './rois';
+import { DEFAULT_TRACE_OPTIONS } from './lane';
 
 export interface Calibration {
   /** Raw signal values sampled from known-dry footage */
@@ -23,6 +24,26 @@ export interface Calibration {
   /** EMA factor, 0..1. Lower = smoother, slower. */
   smoothing: number;
   road: RoadGeometry;
+  /**
+   * Lane-tracer admission thresholds, measured from the footage.
+   *
+   * They decide where the traced corridor stops: how colourful a pixel may be
+   * (`maxSat`) and how far a row's brightness may drift (`lumaTolerance`)
+   * while still counting as tarmac. The defaults were picked against generated
+   * scenes — uniform grey roads, which real tarmac is not — so the real-time
+   * calibration measures them per footage (see autocal.ts) and they persist
+   * here like every other measured constant.
+   */
+  traceMaxSat: number;
+  traceLumaTolerance: number;
+  /**
+   * Trace the road automatically instead of measuring through `road`.
+   *
+   * On by default. The hand-placed trapezoid remains the fallback and the
+   * override: a camera the tracer cannot read still works, and an operator who
+   * has aimed the ROI deliberately can turn tracing off and keep it.
+   */
+  laneAuto: boolean;
   aiIntervalSec: number;
   aiEnabled: boolean;
   /**
@@ -68,6 +89,9 @@ export const DEFAULT_CALIBRATION: Calibration = {
   holdTicks: 6,
   smoothing: 0.16,
   road: { ...DEFAULT_ROAD },
+  traceMaxSat: DEFAULT_TRACE_OPTIONS.maxSat,
+  traceLumaTolerance: DEFAULT_TRACE_OPTIONS.lumaTolerance,
+  laneAuto: true,
   aiIntervalSec: 10,
   aiEnabled: true,
   divergenceReliable: true,
