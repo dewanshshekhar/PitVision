@@ -183,26 +183,79 @@ source.onLoopRestart(() => {
   });
 });
 
-// ── Signal breakdown rows ──────────────────────────────────────────────
+// ── Signal breakdown & Vertical Meter Setup ────────────────────────────
 const SIGNAL_ROWS: [keyof Signals, string][] = [
   ['glare', 'Specular glare'],
   ['texture', 'Texture loss'],
   ['darkness', 'Darkness'],
   ['specular', 'Highlight spread'],
 ];
-const signalBars = new Map<keyof Signals, { fill: HTMLElement; val: HTMLElement }>();
+
+const signalTicks = new Map<keyof Signals, { ticks: HTMLElement[]; val: HTMLElement }>();
 {
-  const host = $('#signals');
-  for (const [key, label] of SIGNAL_ROWS) {
-    const fill = el('i');
-    const val = el('div', { class: 'v' }, '—');
-    host.append(
-      el('div', { class: 'sig' },
-        el('div', { class: 'n' }, label),
-        el('div', { class: 'track' }, fill),
-        val),
-    );
-    signalBars.set(key, { fill, val });
+  for (const [key] of SIGNAL_ROWS) {
+    const bar = $(`#bar-${key}`);
+    const val = $(`#val-${key}`);
+    const ticks: HTMLElement[] = [];
+    if (bar) {
+      bar.replaceChildren();
+      for (let i = 0; i < 24; i++) {
+        const tick = el('div', { class: 'seg-tick' });
+        bar.append(tick);
+        ticks.push(tick);
+      }
+    }
+    signalTicks.set(key, { ticks, val });
+  }
+}
+
+const verticalMeter = $('#vertical-meter');
+const verticalMeterSegs: HTMLElement[] = [];
+if (verticalMeter) {
+  verticalMeter.replaceChildren();
+  for (let i = 0; i < 24; i++) {
+    const seg = el('div', { class: 'vm-seg' });
+    verticalMeter.append(seg);
+    verticalMeterSegs.push(seg);
+  }
+}
+
+const timelineTicksHost = $('#timeline-ticks');
+const timelineTicks: HTMLElement[] = [];
+if (timelineTicksHost) {
+  timelineTicksHost.replaceChildren();
+  for (let i = 0; i < 64; i++) {
+    const tick = el('div', { class: 'tick' });
+    timelineTicksHost.append(tick);
+    timelineTicks.push(tick);
+  }
+}
+
+// ── Terminal Feed Logging ──────────────────────────────────────────────
+const terminalFeed = $('#terminal-feed');
+const terminalInner = $('#terminal-inner');
+const startTime = Date.now();
+
+function formatTimeElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function logTerminal(msg: string) {
+  if (!terminalFeed) return;
+  const ts = formatTimeElapsed(Date.now() - startTime);
+  const line = el('div', { class: 't-line' },
+    el('span', { class: 't-stamp' }, ts),
+    el('span', { class: 't-msg' }, msg)
+  );
+  terminalFeed.append(line);
+  while (terminalFeed.children.length > 25) {
+    terminalFeed.removeChild(terminalFeed.firstElementChild!);
+  }
+  if (terminalInner) {
+    terminalInner.scrollTop = terminalInner.scrollHeight;
   }
 }
 
@@ -210,9 +263,15 @@ const signalBars = new Map<keyof Signals, { fill: HTMLElement; val: HTMLElement 
 const ui = {
   condition: $('#out-condition'),
   index: $('#out-index'),
+  indexNum: $('#out-index-num'),
+  indexArrow: $('#out-index-arrow'),
+  wetnessPin: $('#wetness-pin'),
+  videoWetnessVal: $('#video-wetness-val'),
+  badgeCondition: $('#badge-condition-label'),
   gauge: $('#out-gauge'),
   trend: $('#out-trend'),
   trendArrow: $('#out-trend-arrow'),
+  trendRateBox: $('#trend-rate-box'),
   line: $('#out-line'),
   edge: $('#out-edge'),
   divBar: $('#out-div-bar'),
@@ -233,20 +292,6 @@ const ui = {
   trendRate: $('#trend-rate'),
 };
 
-/**
- * Short code for the tyre badge.
- *
- * A map rather than a ternary chain, because the chain silently blanked every
- * string it did not name — and the one it missed was `Slick (marginal)`, which
- * is the *greasy* call: the single condition where the compound choice is
- * genuinely close and a strategist most needs to be told "slicks, but only
- * just". The badge went empty on exactly the frames that mattered.
- *
- * `SLK*` rather than `SLK` for that case, so a marginal call cannot be read at
- * a glance as a settled one. Anything unmapped falls back to the first three
- * letters, which is wrong-looking rather than invisible — a missing badge reads
- * as "no data", and being loud about an unmapped string is how it gets fixed.
- */
 const TYRE_CODE: Record<string, string> = {
   'Slicks': 'SLK',
   'Slick': 'SLK',
@@ -259,6 +304,7 @@ const TYRE_CODE: Record<string, string> = {
 let lastReading: Reading | null = null;
 let ticksThisSecond = 0;
 let rateWindow = performance.now();
+let lastTerminalLogAt = 0;
 
 function applyReading(r: Reading, _m: FrameMetrics) {
   const previousCondition = lastReading?.condition;
@@ -272,9 +318,11 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   );
   telemetry.observe(r, r.endToEndMs);
   syncLanePill();
-  // A condition change is what a second screen is waiting for, so it goes out
-  // now rather than on the next flush.
-  if (previousCondition && previousCondition !== r.condition) telemetry.observeConditionChange();
+  
+  if (previousCondition && previousCondition !== r.condition) {
+    telemetry.observeConditionChange();
+    logTerminal(`CONDITION CHANGE: ${previousCondition.toUpperCase()} → ${r.condition.toUpperCase()}`);
+  }
 
   const lap = estimateLap(baselineLap, r.condition);
   $('#lap-projected').textContent = formatLap(lap.seconds);
@@ -287,75 +335,93 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   document.documentElement.dataset.condition = r.condition;
 
   const idx = Math.round(r.wetness);
-  // Re-trigger the entrance animation only on an actual change, so the readout
-  // is calm while the state holds and unmistakable when it moves.
-  if (ui.condition.textContent !== r.condition) {
-    ui.condition.classList.remove('flip');
-    void ui.condition.offsetWidth;
-    ui.condition.classList.add('flip');
-    ui.tyre.classList.remove('flip');
-    void ui.tyre.offsetWidth;
-    ui.tyre.classList.add('flip');
-  }
-  ui.condition.textContent = r.condition;
-  ui.index.innerHTML = `${idx}<small>/100</small>`;
-  ui.gauge.style.width = `${r.wetness.toFixed(1)}%`;
-  ui.line.textContent = String(Math.round(r.line));
-  ui.edge.textContent = String(Math.round(r.edge));
+  
+  if (ui.condition) ui.condition.textContent = r.condition.toUpperCase();
+  if (ui.badgeCondition) ui.badgeCondition.textContent = r.condition.toUpperCase();
+  if (ui.indexNum) ui.indexNum.textContent = String(idx);
+  if (ui.videoWetnessVal) ui.videoWetnessVal.textContent = String(idx);
+  if (ui.index) ui.index.innerHTML = `${idx}<small>/100</small>`;
+  if (ui.gauge) ui.gauge.style.width = `${r.wetness.toFixed(1)}%`;
+  if (ui.line) ui.line.textContent = String(Math.round(r.line));
+  if (ui.edge) ui.edge.textContent = String(Math.round(r.edge));
 
-  // Trend is a least-squares slope, so it spikes hard the instant conditions
-  // break. Past a point the exact figure carries no information and a
-  // four-digit number just reads as a bug, so it is capped for display.
+  // Move text and pin up and down with the progress bar
+  if (ui.wetnessPin) {
+    const pct = Math.max(0, Math.min(100, r.wetness));
+    ui.wetnessPin.style.bottom = `${pct}%`;
+  }
+
+  // Update vertical meter segments
+  const activeMeterCount = Math.round((r.wetness / 100) * 24);
+  verticalMeterSegs.forEach((seg, i) => {
+    seg.classList.toggle('active', i < activeMeterCount);
+  });
+
+  // Trend (Red for increasing wetness, Green for decreasing wetness)
   const trend = r.trend;
   const trendMag = Math.abs(trend);
-  ui.trend.textContent =
-    trendMag > 99 ? `${trend >= 0 ? '+' : '−'}99+` : `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}`;
-  ui.trendArrow.textContent = trend > 2.5 ? '↑' : trend < -2.5 ? '↓' : '→';
-  ui.trendRate.textContent = `${trend >= 0 ? '+' : ''}${trend.toFixed(1)} / min`;
+  const trendStr = trendMag > 99 ? `${trend >= 0 ? '+' : '−'}99+` : `${trend >= 0 ? '+' : ''}${trend.toFixed(2)}`;
+  if (ui.trend) ui.trend.textContent = trendStr;
+  if (ui.trendArrow) ui.trendArrow.textContent = trend > 0.4 ? '↑' : trend < -0.4 ? '↓' : '→';
+  if (ui.trendRate) ui.trendRate.textContent = `${trend >= 0 ? '+' : ''}${trend.toFixed(1)} / min`;
 
-  ui.hudCondition.textContent = r.condition;
-  ui.hudIndex.textContent = String(idx);
-  ui.hudLine.textContent = String(Math.round(r.line));
-  ui.hudEdge.textContent = String(Math.round(r.edge));
-  ui.hudDiv.textContent = `${r.divergence >= 0 ? '+' : ''}${r.divergence.toFixed(0)}`;
-
-  // Divergence bar: centre = no difference, right = line drier than edges.
-  const clamped = Math.max(-30, Math.min(30, r.divergence));
-  const half = Math.abs(clamped) / 60;
-  ui.divBar.style.left = clamped >= 0 ? '50%' : `${(0.5 - half) * 100}%`;
-  ui.divBar.style.width = `${half * 100}%`;
-  ui.divBar.style.background = clamped >= 0 ? 'var(--drying)' : 'var(--damp)';
-  if (!cal.divergenceReliable) {
-    // Say why the number is not being acted on, rather than showing a figure
-    // that looks like a dry line but is really the camera angle.
-    ui.divBar.style.width = '0%';
-    ui.divNote.textContent =
-      'Unavailable on this camera angle — the edge bands are not on the track surface. ' +
-      'Wetness detection is unaffected.';
-  } else {
-    ui.divNote.textContent =
-      r.divergence >= cal.divergenceAt
-        ? `Racing line is ${r.divergence.toFixed(0)} points drier than the edges — a dry line is forming.`
-        : r.divergence <= -cal.divergenceAt
-          ? `Edges reading drier than the line — check the ROI placement.`
-          : 'Surface uniform across the width.';
+  if (ui.trendRateBox) {
+    if (trend > 0.4) {
+      ui.trendRateBox.dataset.dir = 'up';
+    } else if (trend < -0.4) {
+      ui.trendRateBox.dataset.dir = 'down';
+    } else {
+      ui.trendRateBox.dataset.dir = 'flat';
+    }
   }
 
-  for (const [key, bar] of signalBars) {
-    const n = r.normalised[key];
-    bar.fill.style.width = `${(n * 100).toFixed(1)}%`;
-    bar.val.textContent = n.toFixed(2);
+  if (ui.hudCondition) ui.hudCondition.textContent = r.condition;
+  if (ui.hudIndex) ui.hudIndex.textContent = String(idx);
+  if (ui.hudLine) ui.hudLine.textContent = String(Math.round(r.line));
+  if (ui.hudEdge) ui.hudEdge.textContent = String(Math.round(r.edge));
+  if (ui.hudDiv) ui.hudDiv.textContent = `${r.divergence >= 0 ? '+' : ''}${r.divergence.toFixed(0)}`;
+
+  // Divergence
+  const clamped = Math.max(-30, Math.min(30, r.divergence));
+  const half = Math.abs(clamped) / 60;
+  if (ui.divBar) {
+    ui.divBar.style.left = clamped >= 0 ? '50%' : `${(0.5 - half) * 100}%`;
+    ui.divBar.style.width = `${half * 100}%`;
+    ui.divBar.style.background = clamped >= 0 ? 'var(--drying)' : 'var(--damp)';
+  }
+
+  // Signal breakdown bars
+  for (const [key, item] of signalTicks) {
+    const n = Math.max(0, Math.min(1, r.normalised[key] ?? 0));
+    if (item.val) item.val.textContent = n.toFixed(2);
+    const activeCount = Math.round(n * 24);
+    item.ticks.forEach((tick, i) => {
+      tick.classList.toggle('active', i < activeCount);
+    });
   }
 
   const s = suggest(r);
-  ui.tyre.textContent = TYRE_CODE[s.tyre] ?? s.tyre.slice(0, 3).toUpperCase();
-  ui.call.textContent = s.call;
-  ui.detail.textContent = s.detail;
-  ui.urgency.textContent = s.urgency;
-  ui.urgency.dataset.u = s.urgency;
+  if (ui.tyre) ui.tyre.textContent = TYRE_CODE[s.tyre] ?? s.tyre.slice(0, 3).toUpperCase();
+  if (ui.call) ui.call.textContent = s.call;
+  if (ui.detail) ui.detail.textContent = s.detail;
+  if (ui.urgency) {
+    ui.urgency.textContent = s.urgency.toUpperCase();
+    ui.urgency.dataset.u = s.urgency;
+  }
+
+  // Periodic terminal telemetry updates
+  const now = performance.now();
+  if (now - lastTerminalLogAt > 6000) {
+    lastTerminalLogAt = now;
+    logTerminal(`WET IDX ${idx} • Δ${Math.abs(r.divergence).toFixed(1)} ${r.condition.toUpperCase()}`);
+  }
 }
 
 engine.onReading(applyReading);
+
+let circuitProgress = 0;
+const circuitGlowPath = document.querySelector<SVGPathElement>('.circuit-glow-path');
+const carDot = document.querySelector<SVGCircleElement>('#map-car-dot');
 
 // ── Render loop ────────────────────────────────────────────────────────
 let lastPaint = 0;
@@ -365,15 +431,27 @@ function frame(t: number) {
   lastFrameAt = performance.now();
   source.pump();
 
-  // Draw the region the detector actually measured, not the one in the
-  // calibration — with tracing on, those are different shapes.
+  // Draw the region the detector actually measured
   overlay.corridor = engine.lastCorridor;
   overlay.draw(engine.lastMetrics, cal, source.width, source.height);
   particles.draw(lastReading?.wetness ?? 0);
 
+  // Circuit car dot animation along SVG track
+  if (circuitGlowPath && carDot) {
+    circuitProgress = (circuitProgress + 0.0018) % 1;
+    try {
+      const len = circuitGlowPath.getTotalLength();
+      const pt = circuitGlowPath.getPointAtLength(circuitProgress * len);
+      carDot.setAttribute('cx', pt.x.toFixed(1));
+      carDot.setAttribute('cy', pt.y.toFixed(1));
+    } catch {
+      /* svg not yet laid out */
+    }
+  }
+
   if (source.usingSynthetic) {
     const scene = source.synthetic;
-    ui.hudPhase.innerHTML = `scene <b>${scene.phase}</b> · ${(scene.time % SCENARIO_LENGTH).toFixed(0)}s`;
+    if (ui.hudPhase) ui.hudPhase.innerHTML = `scene <b>${scene.phase}</b> · ${(scene.time % SCENARIO_LENGTH).toFixed(0)}s`;
   }
 
   if (t - lastPaint > 120) {
@@ -881,3 +959,6 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'o') btnOverlay.click();
   if (e.key === 'h') btnHeat.click();
 });
+
+// Auto-start onboard scene simulation for immediate dashboard telemetry
+useGeneratedScene('onboard');

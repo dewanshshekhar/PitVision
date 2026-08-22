@@ -7,19 +7,19 @@
   "scripts": {
     "dev": "concurrently -n web,api -c cyan,magenta \"npm:dev:web\" \"npm:dev:api\"",
     "dev:web": "vite",
-    "dev:api": "node --disable-warning=ExperimentalWarning --watch server/index.ts",
+    "dev:api": "node --disable-warning=ExperimentalWarning --experimental-strip-types --import ./scripts/ts-resolve.mjs --watch server/index.ts",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "start": "node --disable-warning=ExperimentalWarning server/index.ts",
+    "start": "node --disable-warning=ExperimentalWarning --experimental-strip-types --import ./scripts/ts-resolve.mjs server/index.ts",
     "typecheck": "tsc --noEmit && tsc -p server --noEmit",
-    "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.mjs",
-    "test:lane": "node --disable-warning=ExperimentalWarning scripts/lane-test.mjs",
+    "smoke": "node --disable-warning=ExperimentalWarning --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/smoke.mjs",
+    "test:lane": "node --disable-warning=ExperimentalWarning --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/lane-test.mjs",
     "test": "npm run typecheck && npm run test:lane && npm run test:segclient && npm run test:roi && npm run test:trend && npm run smoke",
-    "test:segclient": "node --disable-warning=ExperimentalWarning --import ./scripts/ts-resolve.mjs scripts/segclient-test.mjs",
-    "test:roi": "node --disable-warning=ExperimentalWarning --import ./scripts/ts-resolve.mjs scripts/roi-test.mjs",
+    "test:segclient": "node --disable-warning=ExperimentalWarning --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/segclient-test.mjs",
+    "test:roi": "node --disable-warning=ExperimentalWarning --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/roi-test.mjs",
     "test:ml": ".venv/bin/python ml/tests/run_all.py",
     "test:all": "npm test && npm run test:ml",
-    "test:trend": "node --disable-warning=ExperimentalWarning --import ./scripts/ts-resolve.mjs scripts/trend-test.mjs"
+    "test:trend": "node --disable-warning=ExperimentalWarning --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/trend-test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.118.0",

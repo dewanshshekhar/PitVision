@@ -71,7 +71,7 @@ const children = [];
 function startServer(port, dbName, extraEnv = {}) {
   const child = spawn(
     process.execPath,
-    ['--disable-warning=ExperimentalWarning', 'server/index.ts'],
+    ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', '--import', './scripts/ts-resolve.mjs', 'server/index.ts'],
     {
       env: {
         ...process.env,
