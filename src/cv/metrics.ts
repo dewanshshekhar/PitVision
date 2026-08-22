@@ -22,6 +22,7 @@ const EMPTY: BandMetrics = {
  */
 let grayBuf: Float32Array | null = null;
 let satBuf: Float32Array | null = null;
+let skyMaskBuf: Uint8Array | null = null;
 let bufW = 0;
 let bufH = 0;
 
@@ -34,9 +35,10 @@ let cellLumaBuf: Float32Array | null = null;
 let heatCells = 0;
 
 function ensureBuffers(w: number, h: number) {
-  if (bufW === w && bufH === h && grayBuf && satBuf) return;
+  if (bufW === w && bufH === h && grayBuf && satBuf && skyMaskBuf) return;
   grayBuf = new Float32Array(w * h);
   satBuf = new Float32Array(w * h);
+  skyMaskBuf = new Uint8Array(w * h);
   bufW = w;
   bufH = h;
 }
@@ -60,6 +62,7 @@ export function warmUp(sampleW: number, sampleH: number, heatW = 30, heatH = 16)
   ensureHeatBuffers(heatW * heatH);
   grayBuf!.fill(0);
   satBuf!.fill(0);
+  skyMaskBuf!.fill(0);
 }
 
 function percentile(hist: Int32Array, total: number, p: number): number {
@@ -101,17 +104,28 @@ export function analyseFrame(
   // trackside shot most of the image is sky, barriers and run-off that no band
   // ever samples.
   const bounds = roadBounds(corridor, w, h);
+  const skyMask = skyMaskBuf!;
+  skyMask.fill(0);
+
   for (let y = bounds.y0; y <= bounds.y1; y++) {
     const row = y * w;
+    const ny = y / h;
     for (let x = bounds.x0; x <= bounds.x1; x++) {
       const p = row + x;
       const i = p * 4;
       const r = data[i], g = data[i + 1], b = data[i + 2];
       // Rec. 601 luma: matches how the eye weights the channels.
-      gray[p] = 0.299 * r + 0.587 * g + 0.114 * b;
+      const l = 0.299 * r + 0.587 * g + 0.114 * b;
       const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
       const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
-      sat[p] = mx === 0 ? 0 : (mx - mn) / mx;
+      const s = mx === 0 ? 0 : (mx - mn) / mx;
+      gray[p] = l;
+      sat[p] = s;
+
+      // Detect sky: blue-excess or top-of-frame overcast sky gradient
+      if (ny < 0.44 && ((b > r + 8 && b > g) || (ny < 0.38 && l > 175 && s < 0.18))) {
+        skyMask[p] = 1;
+      }
     }
   }
 
@@ -135,6 +149,7 @@ export function analyseFrame(
       const row = y * w;
       for (let x = x0; x <= x1; x++) {
         const p = row + x;
+        if (skyMask[p] === 1) continue; // Exclude sky from road metrics
         const l = gray[p];
         sumL += l;
         sumS += sat[p];
@@ -185,9 +200,10 @@ export function analyseFrame(
     const cy = Math.min(heatH - 1, ((y / h) * heatH) | 0);
     const row = y * w;
     for (let x = x0; x <= x1; x++) {
+      const p = row + x;
+      if (skyMask[p] === 1) continue;
       const cx = Math.min(heatW - 1, ((x / w) * heatW) | 0);
       const c = cy * heatW + cx;
-      const p = row + x;
       cellCount[c]++;
       cellLuma[c] += gray[p];
       if (gray[p] >= vThresh && sat[p] <= glare.s) cellGlare[c]++;

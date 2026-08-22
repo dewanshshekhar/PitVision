@@ -7,6 +7,7 @@ import type { Metrics } from './services/metrics.ts';
 import type { Monitor } from './services/monitor.ts';
 import type { Store } from './services/store.ts';
 import type { VerificationService } from './services/verification.ts';
+import type { PitWallService } from './services/pitwall.ts';
 
 /** Everything a route handler is allowed to reach. Wired once, in index.ts. */
 export interface Ctx {
@@ -18,6 +19,7 @@ export interface Ctx {
   monitor: Monitor;
   metrics: Metrics;
   verification: VerificationService;
+  pitwall: PitWallService;
   limiters: { verify: RateLimiter; ingest: RateLimiter };
 }
 

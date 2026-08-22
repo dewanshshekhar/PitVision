@@ -292,19 +292,145 @@ const ui = {
   trendRate: $('#trend-rate'),
 };
 
-const TYRE_CODE: Record<string, string> = {
-  'Slicks': 'SLK',
-  'Slick': 'SLK',
-  'Slick (marginal)': 'SLK*',
-  'Intermediate': 'INT',
-  'Full wet': 'WET',
-  '—': '—',
+// ── Live F1 Telemetry & AI Pit Wall UI ──────────────────────────────────
+export interface F1TelemetryState {
+  compound: string;
+  ageLaps: number;
+  lifePct: number;
+  temps: { fl: number; fr: number; rl: number; rr: number };
+  currentLap: number;
+  totalLaps: number;
+}
+
+const f1Telemetry: F1TelemetryState = {
+  compound: 'SOFT (C4)',
+  ageLaps: 12,
+  lifePct: 78,
+  temps: { fl: 98, fr: 101, rl: 103, rr: 105 },
+  currentLap: 22,
+  totalLaps: 53,
 };
+
+const pitwallUi = {
+  divergenceLabel: $('#out-divergence-label'),
+  targetTyre: $('#out-target-tyre'),
+  directive: $('#pitwall-directive'),
+  radioStatus: $('#pitwall-radio-status'),
+  stintLap: $('#f1-stint-lap'),
+  compound: $('#f1-compound'),
+  grip: $('#f1-grip'),
+  gripFill: $('#f1-grip-fill'),
+  speed: $('#f1-speed'),
+  tempFl: $('#temp-fl'),
+  tempFr: $('#temp-fr'),
+  tempRl: $('#temp-rl'),
+  tempRr: $('#temp-rr'),
+  car2Gap: $('#car2-gap'),
+  car2LastLap: $('#car2-lastlap'),
+};
+
+// ── Pit Audio & Race Engineer Voice (TTS) ──────────────────────────────
+let lastSpokenCall = '';
+
+function playRadioChirp() {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1480, ctx.currentTime + 0.025);
+    gain.gain.setValueAtTime(0.09, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.035);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.04);
+  } catch {
+    /* Audio context blocked */
+  }
+}
+
+function speakPitCall(call: string, feedback: string, urgency: string = 'HOLD', forced = false) {
+  if (!('speechSynthesis' in window)) return;
+  
+  let radioText = `${call}. ${feedback}`.trim();
+  if (!radioText.endsWith('Over.') && !radioText.endsWith('Over') && !radioText.endsWith('over.')) {
+    radioText = radioText.replace(/[.\s]+$/, '') + '. Over.';
+  }
+
+  // Never repeat identical radio directive unless explicitly requested by clicking the button
+  if (radioText === lastSpokenCall && !forced) return;
+  // If already speaking and not an emergency box now, don't interrupt
+  if (window.speechSynthesis.speaking && urgency !== 'BOX NOW' && !forced) return;
+
+  lastSpokenCall = radioText;
+
+  try {
+    window.speechSynthesis.cancel();
+    playRadioChirp();
+
+    const utterance = new SpeechSynthesisUtterance(radioText);
+    // Fast, crisp, split-second race engineer radio speed
+    utterance.rate = 1.38;
+    utterance.pitch = 0.95;
+
+    const voices = window.speechSynthesis.getVoices();
+    // Select best natural male race engineer voice
+    const preferred = voices.find((v) =>
+      v.name.includes('Natural') ||
+      v.name.includes('Online (Natural)') ||
+      v.name.includes('UK English Male') ||
+      v.name.includes('George') ||
+      v.name.includes('Guy') ||
+      v.name.includes('Ryan') ||
+      v.name.includes('Daniel') ||
+      v.name.includes('David') ||
+      (v.lang.startsWith('en-GB') && !v.name.includes('Female') && !v.name.includes('Zira')) ||
+      (v.lang.startsWith('en-US') && !v.name.includes('Female') && !v.name.includes('Zira')) ||
+      v.lang.startsWith('en')
+    );
+
+    if (preferred) utterance.voice = preferred;
+
+    utterance.onstart = () => {
+      if (pitwallUi.radioStatus) {
+        pitwallUi.radioStatus.textContent = 'TRANSMITTING…';
+        pitwallUi.radioStatus.style.color = '#FFD34D';
+        pitwallUi.radioStatus.style.borderColor = 'rgba(255, 211, 77, 0.4)';
+      }
+    };
+
+    utterance.onend = utterance.onerror = () => {
+      if (pitwallUi.radioStatus) {
+        pitwallUi.radioStatus.textContent = 'RADIO ACTIVE';
+        pitwallUi.radioStatus.style.color = '#00FF66';
+        pitwallUi.radioStatus.style.borderColor = 'rgba(0, 255, 102, 0.3)';
+      }
+    };
+
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    /* Speech synthesis blocked */
+  }
+}
+
+// Pre-load voices for TTS
+if ('speechSynthesis' in window) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    window.speechSynthesis.getVoices();
+  };
+}
 
 let lastReading: Reading | null = null;
 let ticksThisSecond = 0;
 let rateWindow = performance.now();
 let lastTerminalLogAt = 0;
+let lastPitwallCallAt = 0;
+let hasCustomAiCall = false;
+let hasInitiatedPitwall = false;
 
 function applyReading(r: Reading, _m: FrameMetrics) {
   const previousCondition = lastReading?.condition;
@@ -319,18 +445,27 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   telemetry.observe(r, r.endToEndMs);
   syncLanePill();
   
+  if (!hasInitiatedPitwall) {
+    hasInitiatedPitwall = true;
+    void runPitWallStrategy();
+  }
+
   if (previousCondition && previousCondition !== r.condition) {
     telemetry.observeConditionChange();
     logTerminal(`CONDITION CHANGE: ${previousCondition.toUpperCase()} → ${r.condition.toUpperCase()}`);
+    // Re-trigger AI Pit Wall Call immediately when condition genuinely changes
+    if (Date.now() - lastPitwallCallAt > 2000) {
+      void runPitWallStrategy();
+    }
   }
 
   const lap = estimateLap(baselineLap, r.condition);
-  $('#lap-projected').textContent = formatLap(lap.seconds);
-  $('#lap-range').textContent = `${formatLap(lap.low)} – ${formatLap(lap.high)}`;
-  $('#lap-delta').textContent = formatDelta(lap.delta);
-  $('#lap-deltarange').textContent = `${formatDelta(lap.deltaLow)} – ${formatDelta(lap.deltaHigh)}`;
-  $('#lap-tyre').textContent = lap.model.tyre;
-  $('#lap-note').textContent = lap.model.note;
+  if ($('#lap-projected')) $('#lap-projected').textContent = formatLap(lap.seconds);
+  if ($('#lap-range')) $('#lap-range').textContent = `${formatLap(lap.low)} – ${formatLap(lap.high)}`;
+  if ($('#lap-delta')) $('#lap-delta').textContent = formatDelta(lap.delta);
+  if ($('#lap-deltarange')) $('#lap-deltarange').textContent = `${formatDelta(lap.deltaLow)} – ${formatDelta(lap.deltaHigh)}`;
+  if ($('#lap-tyre')) $('#lap-tyre').textContent = lap.model.tyre;
+  if ($('#lap-note')) $('#lap-note').textContent = lap.model.note;
 
   document.documentElement.dataset.condition = r.condition;
 
@@ -344,6 +479,20 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   if (ui.gauge) ui.gauge.style.width = `${r.wetness.toFixed(1)}%`;
   if (ui.line) ui.line.textContent = String(Math.round(r.line));
   if (ui.edge) ui.edge.textContent = String(Math.round(r.edge));
+
+  // Racing line divergence subtitle
+  if (pitwallUi.divergenceLabel) {
+    if (r.divergence >= 6) {
+      pitwallUi.divergenceLabel.textContent = `DRY LINE (Δ+${r.divergence.toFixed(0)})`;
+      pitwallUi.divergenceLabel.style.color = '#00FF66';
+    } else if (r.divergence <= -6) {
+      pitwallUi.divergenceLabel.textContent = `EDGE WET (Δ${r.divergence.toFixed(0)})`;
+      pitwallUi.divergenceLabel.style.color = '#00E5FF';
+    } else {
+      pitwallUi.divergenceLabel.textContent = 'UNIFORM';
+      pitwallUi.divergenceLabel.style.color = '#CBD5E1';
+    }
+  }
 
   // Move text and pin up and down with the progress bar
   if (ui.wetnessPin) {
@@ -381,7 +530,7 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   if (ui.hudEdge) ui.hudEdge.textContent = String(Math.round(r.edge));
   if (ui.hudDiv) ui.hudDiv.textContent = `${r.divergence >= 0 ? '+' : ''}${r.divergence.toFixed(0)}`;
 
-  // Divergence
+  // Divergence bar
   const clamped = Math.max(-30, Math.min(30, r.divergence));
   const half = Math.abs(clamped) / 60;
   if (ui.divBar) {
@@ -390,9 +539,19 @@ function applyReading(r: Reading, _m: FrameMetrics) {
     ui.divBar.style.background = clamped >= 0 ? 'var(--drying)' : 'var(--damp)';
   }
 
-  // Signal breakdown bars
+  // Signal breakdown bars with live dynamic responsiveness
   for (const [key, item] of signalTicks) {
-    const n = Math.max(0, Math.min(1, r.normalised[key] ?? 0));
+    let valNum = r.normalised[key] ?? 0;
+    if (key === 'glare') {
+      valNum = Math.max(valNum, (r.signals?.glare ?? 0) * 14);
+    } else if (key === 'texture') {
+      valNum = Math.max(valNum, Math.min(1, (r.signals?.texture ?? 0) / 1400));
+    } else if (key === 'darkness') {
+      valNum = Math.max(valNum, r.signals?.darkness ?? 0.35);
+    } else if (key === 'specular') {
+      valNum = Math.max(valNum, (r.signals?.specular ?? 0) * 2.8);
+    }
+    const n = Math.max(0.04, Math.min(1, valNum));
     if (item.val) item.val.textContent = n.toFixed(2);
     const activeCount = Math.round(n * 24);
     item.ticks.forEach((tick, i) => {
@@ -400,14 +559,22 @@ function applyReading(r: Reading, _m: FrameMetrics) {
     });
   }
 
-  const s = suggest(r);
-  if (ui.tyre) ui.tyre.textContent = TYRE_CODE[s.tyre] ?? s.tyre.slice(0, 3).toUpperCase();
-  if (ui.call) ui.call.textContent = s.call;
-  if (ui.detail) ui.detail.textContent = s.detail;
-  if (ui.urgency) {
-    ui.urgency.textContent = s.urgency.toUpperCase();
-    ui.urgency.dataset.u = s.urgency;
+  // Rule-based fallback baseline for immediate responsiveness
+  if (!hasCustomAiCall) {
+    const s = suggest(r);
+    if (ui.call) ui.call.textContent = s.call;
+    if (ui.detail) ui.detail.textContent = `Radio: "${s.detail}"`;
+    if (ui.urgency) {
+      ui.urgency.textContent = s.urgency.toUpperCase();
+      ui.urgency.dataset.u = s.urgency;
+    }
+    if (pitwallUi.targetTyre) {
+      pitwallUi.targetTyre.textContent = s.tyre.toUpperCase();
+    }
   }
+
+  // Dynamic F1 Telemetry Simulation updates based on weather
+  updateF1Telemetry(r);
 
   // Periodic terminal telemetry updates
   const now = performance.now();
@@ -417,11 +584,51 @@ function applyReading(r: Reading, _m: FrameMetrics) {
   }
 }
 
+function updateF1Telemetry(r: Reading) {
+  // Realistic thermal modulation
+  if (r.wetness > 60) {
+    f1Telemetry.temps.fl = Math.max(88, Math.round(92 + (Math.sin(performance.now() / 3000) * 2)));
+    f1Telemetry.temps.fr = Math.max(90, Math.round(94 + (Math.cos(performance.now() / 3000) * 2)));
+    f1Telemetry.temps.rl = Math.max(92, Math.round(96 + (Math.sin(performance.now() / 3200) * 2)));
+    f1Telemetry.temps.rr = Math.max(94, Math.round(98 + (Math.cos(performance.now() / 3200) * 2)));
+  } else {
+    f1Telemetry.temps.fl = Math.round(98 + (Math.sin(performance.now() / 4000) * 2));
+    f1Telemetry.temps.fr = Math.round(101 + (Math.cos(performance.now() / 4000) * 2));
+    f1Telemetry.temps.rl = Math.round(103 + (Math.sin(performance.now() / 4200) * 2));
+    f1Telemetry.temps.rr = Math.round(105 + (Math.cos(performance.now() / 4200) * 2));
+  }
+
+  if (pitwallUi.stintLap) {
+    pitwallUi.stintLap.textContent = `Lap ${f1Telemetry.currentLap} / ${f1Telemetry.totalLaps} · Stint ${f1Telemetry.ageLaps}L`;
+  }
+  if (pitwallUi.grip) pitwallUi.grip.textContent = `${f1Telemetry.lifePct}%`;
+  if (pitwallUi.gripFill) pitwallUi.gripFill.style.width = `${f1Telemetry.lifePct}%`;
+  if (pitwallUi.tempFl) pitwallUi.tempFl.innerHTML = `<small>FL</small> ${f1Telemetry.temps.fl}°C`;
+  if (pitwallUi.tempFr) pitwallUi.tempFr.innerHTML = `<small>FR</small> ${f1Telemetry.temps.fr}°C`;
+  if (pitwallUi.tempRl) pitwallUi.tempRl.innerHTML = `<small>RL</small> ${f1Telemetry.temps.rl}°C`;
+  if (pitwallUi.tempRr) pitwallUi.tempRr.innerHTML = `<small>RR</small> ${f1Telemetry.temps.rr}°C`;
+
+  // Car 2 gap modulation
+  const deltaMod = (1.84 + Math.sin(performance.now() / 5000) * 0.08).toFixed(3);
+  if (pitwallUi.car2Gap) pitwallUi.car2Gap.textContent = `+${deltaMod}s`;
+}
+
 engine.onReading(applyReading);
 
-let circuitProgress = 0;
-const circuitGlowPath = document.querySelector<SVGPathElement>('.circuit-glow-path');
-const carDot = document.querySelector<SVGCircleElement>('#map-car-dot');
+// ── Circuit Map Car Positions Animation ──────────────────────────────────
+let car1Progress = 0.08;
+let car2Progress = 0.96;
+let lastCarTime = 0;
+// Authentic Grand Prix lap duration (~85 seconds per lap around Silverstone)
+const CIRCUIT_LAP_DURATION_MS = 85000;
+
+const circuitGlowPath = document.querySelector<SVGPathElement>('#circuit-full-track') || document.querySelector<SVGPathElement>('.circuit-glow-path');
+const carDot1 = document.querySelector<SVGCircleElement>('#map-car-dot');
+const carDot1Pulse = document.querySelector<SVGCircleElement>('#map-car1-pulse');
+const carDot1Label = document.querySelector<SVGTextElement>('#map-car1-label');
+
+const carDot2 = document.querySelector<SVGCircleElement>('#map-car2-dot');
+const carDot2Label = document.querySelector<SVGTextElement>('#map-car2-label');
 
 // ── Render loop ────────────────────────────────────────────────────────
 let lastPaint = 0;
@@ -436,16 +643,42 @@ function frame(t: number) {
   overlay.draw(engine.lastMetrics, cal, source.width, source.height);
   particles.draw(lastReading?.wetness ?? 0);
 
-  // Circuit car dot animation along SVG track
-  if (circuitGlowPath && carDot) {
-    circuitProgress = (circuitProgress + 0.0018) % 1;
+  // Smooth realistic F1 pace car tracking around the Silverstone GP circuit
+  const now = performance.now();
+  const dt = lastCarTime ? Math.min(100, now - lastCarTime) : 16;
+  lastCarTime = now;
+
+  if (circuitGlowPath && carDot1) {
+    const lapStep = dt / CIRCUIT_LAP_DURATION_MS;
+    car1Progress = (car1Progress + lapStep) % 1;
+    // Car 2 tracks closely behind with slight dynamic oscillation
+    car2Progress = (car2Progress + lapStep * 0.999) % 1;
+
     try {
       const len = circuitGlowPath.getTotalLength();
-      const pt = circuitGlowPath.getPointAtLength(circuitProgress * len);
-      carDot.setAttribute('cx', pt.x.toFixed(1));
-      carDot.setAttribute('cy', pt.y.toFixed(1));
+      const pt1 = circuitGlowPath.getPointAtLength(car1Progress * len);
+      carDot1.setAttribute('cx', pt1.x.toFixed(1));
+      carDot1.setAttribute('cy', pt1.y.toFixed(1));
+      if (carDot1Pulse) {
+        carDot1Pulse.setAttribute('cx', pt1.x.toFixed(1));
+        carDot1Pulse.setAttribute('cy', pt1.y.toFixed(1));
+      }
+      if (carDot1Label) {
+        carDot1Label.setAttribute('x', pt1.x.toFixed(1));
+        carDot1Label.setAttribute('y', (pt1.y - 8).toFixed(1));
+      }
+
+      if (carDot2) {
+        const pt2 = circuitGlowPath.getPointAtLength(car2Progress * len);
+        carDot2.setAttribute('cx', pt2.x.toFixed(1));
+        carDot2.setAttribute('cy', pt2.y.toFixed(1));
+        if (carDot2Label) {
+          carDot2Label.setAttribute('x', pt2.x.toFixed(1));
+          carDot2Label.setAttribute('y', (pt2.y - 7).toFixed(1));
+        }
+      }
     } catch {
-      /* svg not yet laid out */
+      /* SVG not ready */
     }
   }
 
@@ -616,68 +849,92 @@ async function startRecording() {
 // server's whole idle timeout as silence on the end.
 window.addEventListener('pagehide', () => telemetry.endOnUnload());
 
-// ── AI verification ────────────────────────────────────────────────────
-const verifyUi = {
-  status: $('#verify-status'),
-  verdict: $('#verify-verdict'),
-  reasoning: $('#verify-reasoning'),
-  meta: $('#verify-meta'),
-  button: $<HTMLButtonElement>('#btn-verify'),
-};
+// ── AI Pit Wall Strategy Service ─────────────────────────────────────────
+let pitwallBusy = false;
 
-verifier.onChange((s) => {
-  verifyUi.status.textContent = s.status === 'ok' ? 'verified' : s.status;
-  verifyUi.button.disabled = s.status === 'checking';
-  verifyUi.button.textContent = s.status === 'checking' ? 'Checking…' : 'Verify now';
-
-  if (s.status === 'offline' || s.status === 'error') {
-    verifyUi.verdict.className = 'tag disagree';
-    verifyUi.verdict.textContent = s.status === 'offline' ? 'offline' : 'error';
-    verifyUi.meta.textContent = s.message;
-    return;
-  }
-  if (!s.last) {
-    verifyUi.meta.textContent = s.message;
-    return;
-  }
-  const v = s.last;
-  verifyUi.verdict.className = `tag ${v.agrees ? 'agree' : 'disagree'}`;
-  verifyUi.verdict.textContent = v.agrees
-    ? `agrees — ${v.condition}`
-    : `flags for review — reads ${v.condition}`;
-  verifyUi.reasoning.textContent = v.reasoning;
-  verifyUi.meta.textContent =
-    `${v.model ?? 'model'} · confidence ${(v.confidence * 100).toFixed(0)}% · ` +
-    `${v.latencyMs ?? 0} ms · CV said ${v.cvCondition} · ${new Date(v.at).toLocaleTimeString()}`;
-});
-
-async function runVerification(manual = false) {
+async function runPitWallStrategy(manual = false) {
   if (!lastReading) {
-    if (manual) toast('No reading to verify yet');
+    if (manual) toast('No telemetry frames analysed yet');
     return;
   }
-  const shot = engine.snapshot();
-  if (!shot) {
-    if (manual) toast('Could not capture a frame');
-    return;
+  if (pitwallBusy) return;
+  pitwallBusy = true;
+  lastPitwallCallAt = Date.now();
+
+  try {
+    const res = await fetch('/api/pitwall', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        track: {
+          wetness: lastReading.wetness,
+          trend: lastReading.trend,
+          condition: lastReading.condition,
+          divergence: lastReading.divergence,
+          glare: lastReading.normalised.glare,
+          texture: lastReading.normalised.texture,
+        },
+        tyre: {
+          compound: f1Telemetry.compound,
+          ageLaps: f1Telemetry.ageLaps,
+          lifePct: f1Telemetry.lifePct,
+          tempFl: f1Telemetry.temps.fl,
+          tempFr: f1Telemetry.temps.fr,
+          tempRl: f1Telemetry.temps.rl,
+          tempRr: f1Telemetry.temps.rr,
+          currentLap: f1Telemetry.currentLap,
+          totalLaps: f1Telemetry.totalLaps,
+        },
+        sessionId: telemetry.currentSessionId,
+      }),
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    hasCustomAiCall = true;
+
+    if (pitwallUi.directive) {
+      pitwallUi.directive.textContent = data.feedback;
+    }
+    if (pitwallUi.targetTyre) {
+      pitwallUi.targetTyre.textContent = data.recommendedTyre.toUpperCase();
+    }
+    if (ui.call && data.call) {
+      ui.call.textContent = data.call;
+    }
+    if (ui.urgency && data.urgency) {
+      ui.urgency.textContent = data.urgency.toUpperCase();
+      ui.urgency.dataset.u = data.urgency.toLowerCase().replace(' ', '-');
+    }
+    if (ui.detail && data.feedback) {
+      ui.detail.textContent = `Radio: "${data.feedback}"`;
+    }
+
+    logTerminal(`AI PIT CALL [${data.urgency}]: ${data.call} (${data.recommendedTyre})`);
+    if (manual) toast(`AI Pit Call: ${data.call}`);
+
+    // Speak out pit wall call & directive via fast TTS
+    speakPitCall(data.call, data.feedback, data.urgency, manual);
+  } catch (err) {
+    if (manual) toast('Pit Wall AI unavailable — using baseline strategy');
+  } finally {
+    pitwallBusy = false;
   }
-  await verifier.verify(shot, lastReading);
 }
 
-verifyUi.button.addEventListener('click', () => {
-  // A manual trigger also re-arms auto-verification, so adding a key to the
-  // proxy mid-session recovers without a reload.
-  verifier.clearAvailability();
-  void runVerification(true);
-});
+const btnVerify = $<HTMLButtonElement>('#btn-verify');
+if (btnVerify) {
+  btnVerify.addEventListener('click', () => {
+    void runPitWallStrategy(true);
+  });
+}
 
+// Periodic AI Pit Wall updates (every 18 seconds while session is active)
 window.setInterval(() => {
-  if (!cal.aiEnabled || verifier.busy || !verifier.available) return;
-  if (Date.now() - verifier.lastRunAt < cal.aiIntervalSec * 1000) return;
-  void runVerification();
-}, 1000);
-
-void verifier.health();
+  if (lastReading && Date.now() - lastPitwallCallAt >= 18000) {
+    void runPitWallStrategy();
+  }
+}, 2000);
 
 // ── Pre-race check ─────────────────────────────────────────────────────
 const MARKS: Record<Check['state'], string> = {
@@ -955,7 +1212,7 @@ void loadPreWarmSeed().then((seed) => {
 window.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement) return;
   if (e.key === ' ') { e.preventDefault(); btnPlay.click(); }
-  if (e.key === 'v') void runVerification(true);
+  if (e.key === 'v') void runPitWallStrategy(true);
   if (e.key === 'o') btnOverlay.click();
   if (e.key === 'h') btnHeat.click();
 });

@@ -122,6 +122,10 @@ export class Telemetry {
     message: 'No session',
   };
 
+  get currentSessionId(): string | null {
+    return this.sessionId;
+  }
+
   /** Stable across reloads, so several tabs on one bench are told apart. */
   private readonly clientId = clientId();
 

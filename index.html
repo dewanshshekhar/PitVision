@@ -69,25 +69,127 @@
         <button class="tool-btn" id="btn-overlay" aria-pressed="true">Overlay</button>
         <button class="tool-btn" id="btn-heat" aria-pressed="true">Heat</button>
         <button class="tool-btn" id="btn-sound">Sound</button>
-        <button class="tool-btn" id="btn-verify">AI Check</button>
+        <button class="tool-btn" id="btn-verify">AI Pit Call</button>
       </div>
     </section>
 
-    <!-- 3. Track Status Card -->
+    <!-- 3. Track Status & AI Pit Wall Card (Spans Rows 1 & 2) -->
     <section class="glass-card card-track-status" id="sec-track-status">
-      <h2 class="card-title">Track Status</h2>
-      <div class="status-value-hero" id="out-condition">DAMP</div>
+      <div class="track-status-header">
+        <h2 class="card-title">Track Status</h2>
+        <div class="track-env-chips">
+          <span class="env-chip" id="env-track-temp">TRK 34°C</span>
+          <span class="env-chip" id="env-air-temp">AIR 23°C</span>
+          <span class="env-chip" id="env-rain-risk">RAIN 12%</span>
+        </div>
+      </div>
+      
+      <div class="status-hero-row">
+        <div class="status-value-hero" id="out-condition">DRY</div>
+        <div class="status-wetness-compact">
+          <span class="sub-label">RACING LINE</span>
+          <span class="sub-val" id="out-divergence-label">DRY LINE (Δ+4)</span>
+        </div>
+      </div>
       
       <div class="tyre-call-block">
-        <h3 class="section-subtitle">Tyre Call</h3>
+        <div class="section-subtitle-row">
+          <h3 class="section-subtitle">Tactical Tyre Call</h3>
+          <span class="tyre-target-badge" id="out-target-tyre">SLICKS</span>
+        </div>
         <div class="tyre-call-row">
           <span class="hold-badge" id="out-urgency" data-u="hold">HOLD</span>
-          <span class="tyre-call-text" id="out-call">Full wets, hold</span>
+          <span class="tyre-call-text" id="out-call">Stay out, tyres healthy</span>
         </div>
       </div>
 
+      <!-- Pit Crew Strategy Directives -->
+      <div class="pitwall-ai-panel" id="pitwall-ai-panel">
+        <div class="pitwall-header">
+          <div class="pitwall-title">
+            <svg class="ai-spark-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M8 1L9.5 5.5L14 7L9.5 8.5L8 13L6.5 8.5L2 7L6.5 5.5L8 1Z" fill="#00E5FF"/>
+            </svg>
+            <span>Pit Wall Strategy</span>
+          </div>
+          <span class="pitwall-status-tag" id="pitwall-radio-status">RADIO ACTIVE</span>
+        </div>
+        <p class="pitwall-directive-text" id="pitwall-directive">Maintain current pace and manage rear tyre temperatures. Crew stand by for planned stop around lap 28. Focus on consistent lap times and avoid unnecessary kerb strikes.</p>
+      </div>
+
+      <!-- Live F1 Telemetry Section: Car 1 (Leader) -->
+      <div class="f1-telemetry-panel">
+        <div class="f1-panel-header">
+          <div class="f1-car-ident">
+            <span class="car-badge car1">#1 VER</span>
+            <span class="f1-title">Car 1 Telemetry (P1)</span>
+          </div>
+          <span class="f1-stint" id="f1-stint-lap">Lap 22 / 53 · Stint 12L</span>
+        </div>
+        <div class="f1-telemetry-grid">
+          <div class="f1-tele-item">
+            <span class="tele-lbl">COMPOUND</span>
+            <span class="tele-val highlight" id="f1-compound"><i class="tyre-dot soft"></i> SOFT (C4)</span>
+          </div>
+          <div class="f1-tele-item">
+            <span class="tele-lbl">PACE / SPEED</span>
+            <span class="tele-val" id="f1-speed">312 km/h · 8th</span>
+          </div>
+          <div class="f1-tele-item">
+            <span class="tele-lbl">EST. GRIP</span>
+            <div class="grip-bar-wrap">
+              <span class="tele-val" id="f1-grip">78%</span>
+              <div class="grip-bar-track"><div class="grip-bar-fill" id="f1-grip-fill" style="width: 78%;"></div></div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="f1-tyre-temps-row">
+          <span class="tele-lbl">TYRE BULK TEMPS</span>
+          <div class="tyre-temp-quad">
+            <span class="temp-box" id="temp-fl"><small>FL</small> 98°C</span>
+            <span class="temp-box" id="temp-fr"><small>FR</small> 101°C</span>
+            <span class="temp-box" id="temp-rl"><small>RL</small> 103°C</span>
+            <span class="temp-box" id="temp-rr"><small>RR</small> 105°C</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Car 2 / Teammate Delta Telemetry -->
+      <div class="f1-telemetry-panel f1-rival-panel">
+        <div class="f1-panel-header">
+          <div class="f1-car-ident">
+            <span class="car-badge car2">#2 NOR</span>
+            <span class="f1-title">Car 2 Delta (P2)</span>
+          </div>
+          <span class="f1-gap-badge" id="car2-gap">+1.842s</span>
+        </div>
+        <div class="f1-rival-grid">
+          <div class="f1-rival-item">
+            <span class="tele-lbl">COMPOUND</span>
+            <span class="tele-val" id="car2-compound"><i class="tyre-dot med"></i> MED (C3) 18L</span>
+          </div>
+          <div class="f1-rival-item">
+            <span class="tele-lbl">LAST LAP</span>
+            <span class="tele-val" id="car2-lastlap">1:31.420 <small class="delta-neg">(-0.23s)</small></span>
+          </div>
+          <div class="f1-rival-item">
+            <span class="tele-lbl">SECTOR SPLITS</span>
+            <div class="sector-splits">
+              <span class="sec-tag sec-green" id="car2-s1">S1 28.3</span>
+              <span class="sec-tag sec-yellow" id="car2-s2">S2 36.2</span>
+              <span class="sec-tag sec-purple" id="car2-s3">S3 26.8</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pit Radio Broadcast Box -->
       <div class="warning-panel" id="track-warning-panel">
-        <p class="warning-text" id="out-detail">Standing water building fast (+18.8/min). Anything but full wets is aquaplaning risk.</p>
+        <div class="radio-broadcast-row">
+          <span class="radio-icon">📻</span>
+          <p class="warning-text" id="out-detail">Radio: "Maintain tyre management through sector 2. Clean air ahead."</p>
+        </div>
       </div>
     </section>
 
@@ -123,21 +225,6 @@
             <span class="signal-value" id="val-specular">0.00</span>
           </div>
           <div class="segmented-bar" id="bar-specular"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 5. AI Verification Card -->
-    <section class="glass-card card-ai-verification" id="sec-verify">
-      <h2 class="card-title">AI Verification</h2>
-      <div class="ai-verification-body">
-        <div class="ai-idle-placeholder" id="verify-placeholder">
-          <div class="ai-status-row" style="display: none;">
-            <span class="ai-tag" id="verify-verdict">Standing by</span>
-            <span class="ai-rate" id="verify-status">idle</span>
-          </div>
-          <p class="ai-reasoning" id="verify-reasoning" style="display: none;"></p>
-          <div class="ai-meta" id="verify-meta" style="display: none;"></div>
         </div>
       </div>
     </section>
@@ -193,26 +280,67 @@
       </div>
     </section>
 
-    <!-- 8. Map Card -->
+    <!-- 8. Map Card (Authentic Grand Prix Circuit with 2 Cars) -->
     <section class="glass-card card-map" id="sec-map">
-      <h2 class="card-title">Map</h2>
+      <div class="map-card-header">
+        <h2 class="card-title">Circuit Map</h2>
+        <div class="map-header-badges">
+          <span class="circuit-name">SILVERSTONE GP</span>
+          <span class="drs-status-badge">DRS ACTIVE</span>
+        </div>
+      </div>
       <div class="map-circuit-container">
-        <svg class="map-circuit-svg" viewBox="0 0 320 190" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <svg class="map-circuit-svg" viewBox="0 0 360 210" fill="none" xmlns="http://www.w3.org/2000/svg">
           <defs>
             <linearGradient id="grad-circuit" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stop-color="#00E5FF" />
-              <stop offset="35%" stop-color="#FDE047" />
-              <stop offset="65%" stop-color="#00FF66" />
-              <stop offset="100%" stop-color="#A855F7" />
+              <stop offset="35%" stop-color="#00FF66" />
+              <stop offset="70%" stop-color="#FFD34D" />
+              <stop offset="100%" stop-color="#00E5FF" />
             </linearGradient>
-            <filter id="glow-circuit" x="-30%" y="-30%" width="160%" height="160%">
-              <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#00E5FF" flood-opacity="0.5"/>
+            <filter id="glow-circuit" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="0" stdDeviation="4" flood-color="#00E5FF" flood-opacity="0.4"/>
+            </filter>
+            <filter id="car1-glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feDropShadow dx="0" dy="0" stdDeviation="4" flood-color="#00E5FF" flood-opacity="0.9"/>
+            </filter>
+            <filter id="car2-glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feDropShadow dx="0" dy="0" stdDeviation="4" flood-color="#FF5C5C" flood-opacity="0.9"/>
             </filter>
           </defs>
-          <path class="circuit-glow-path" d="M 70 150 C 40 145 25 115 40 85 C 55 55 90 35 120 30 C 145 25 160 48 185 48 C 215 48 245 45 270 65 C 295 85 295 115 280 135 C 265 152 235 150 200 150 C 160 150 115 152 70 150 Z" stroke="url(#grad-circuit)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow-circuit)"/>
-          <path class="circuit-core-path" d="M 70 150 C 40 145 25 115 40 85 C 55 55 90 35 120 30 C 145 25 160 48 185 48 C 215 48 245 45 270 65 C 295 85 295 115 280 135 C 265 152 235 150 200 150 C 160 150 115 152 70 150 Z" stroke="url(#grad-circuit)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-          <circle id="map-car-dot" cx="70" cy="150" r="4.5" fill="#FFFFFF" filter="drop-shadow(0 0 6px #00E5FF)"/>
+          
+          <!-- Sector 1, 2, 3 Background Outlines -->
+          <!-- Real Silverstone GP track spline path -->
+          <path id="circuit-full-track" class="circuit-glow-path" d="M 65 168 C 110 168 150 168 185 168 C 215 168 235 155 240 135 C 245 115 220 100 205 95 C 190 90 180 75 190 60 C 200 45 225 45 255 45 C 285 45 320 55 330 75 C 340 95 325 120 310 135 C 295 150 280 165 295 180 C 305 190 325 185 340 170 C 345 145 345 110 340 80 C 330 40 290 20 240 20 C 195 20 160 30 135 45 C 115 58 95 70 75 75 C 50 80 30 95 25 120 C 20 145 35 168 65 168 Z" stroke="url(#grad-circuit)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow-circuit)"/>
+          <path id="circuit-core-track" class="circuit-core-path" d="M 65 168 C 110 168 150 168 185 168 C 215 168 235 155 240 135 C 245 115 220 100 205 95 C 190 90 180 75 190 60 C 200 45 225 45 255 45 C 285 45 320 55 330 75 C 340 95 325 120 310 135 C 295 150 280 165 295 180 C 305 190 325 185 340 170 C 345 145 345 110 340 80 C 330 40 290 20 240 20 C 195 20 160 30 135 45 C 115 58 95 70 75 75 C 50 80 30 95 25 120 C 20 145 35 168 65 168 Z" stroke="rgba(255,255,255,0.75)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          
+          <!-- Start / Finish Line -->
+          <line x1="120" y1="160" x2="120" y2="176" stroke="#FFFFFF" stroke-width="3" stroke-dasharray="2 2" />
+          <text x="120" y="186" fill="#94A3B8" font-size="8" font-family="monospace" text-anchor="middle">S/F</text>
+          
+          <!-- Sector demarcations -->
+          <text x="245" y="36" fill="#64748B" font-size="8" font-family="monospace">SECTOR 1</text>
+          <text x="325" y="115" fill="#64748B" font-size="8" font-family="monospace">S2</text>
+          <text x="45" y="115" fill="#64748B" font-size="8" font-family="monospace">S3</text>
+          
+          <!-- Car 2 (Rival - NOR #2, Red) -->
+          <g id="map-car2-group">
+            <circle id="map-car2-dot" cx="240" cy="135" r="4" fill="#FF5C5C" filter="url(#car2-glow)"/>
+            <text id="map-car2-label" x="240" y="128" fill="#FF5C5C" font-size="8" font-family="monospace" font-weight="700" text-anchor="middle">2</text>
+          </g>
+          
+          <!-- Car 1 (Leader - VER #1, Cyan/Gold) -->
+          <g id="map-car1-group">
+            <circle id="map-car1-pulse" cx="65" cy="168" r="7" fill="none" stroke="#00E5FF" stroke-width="1.5" opacity="0.6"/>
+            <circle id="map-car-dot" cx="65" cy="168" r="4.5" fill="#00E5FF" filter="url(#car1-glow)"/>
+            <text id="map-car1-label" x="65" y="160" fill="#00E5FF" font-size="8" font-family="monospace" font-weight="700" text-anchor="middle">1</text>
+          </g>
         </svg>
+      </div>
+      <div class="map-footer-stats">
+        <span class="map-stat-item"><span class="stat-dot dot-c1"></span> Car 1: P1 (Lead)</span>
+        <span class="map-stat-item"><span class="stat-dot dot-c2"></span> Car 2: P2 (+1.84s)</span>
+        <span class="map-stat-item">5.891 km · Lap 22</span>
       </div>
     </section>
 

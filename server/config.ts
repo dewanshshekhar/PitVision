@@ -58,6 +58,8 @@ export interface Config {
   /** Bearer token required on write endpoints. Empty means auth is off. */
   apiToken: string;
   anthropicKey: string;
+  groqKey: string;
+  groqModel: string;
   model: string;
   /** Hard ceiling on one Anthropic call, milliseconds. */
   verifyTimeoutMs: number;
@@ -98,6 +100,8 @@ export function loadConfig(): Config {
     dbPath: str('PITVISION_DB', 'data/pitvision.db'),
     apiToken: str('PITVISION_API_TOKEN', ''),
     anthropicKey: str('ANTHROPIC_API_KEY', ''),
+    groqKey: str('GROQ_API_KEY', ''),
+    groqModel: str('GROQ_MODEL', 'qwen/qwen3.6-27b'),
     model: str('PITVISION_MODEL', 'claude-opus-5'),
     verifyTimeoutMs: num('PITVISION_VERIFY_TIMEOUT_MS', 20_000, { min: 1000, max: 120_000 }),
     verifyRetries: num('PITVISION_VERIFY_RETRIES', 1, { min: 0, max: 5 }),

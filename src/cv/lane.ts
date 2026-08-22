@@ -88,11 +88,10 @@ export interface TraceOptions {
 }
 
 export const DEFAULT_TRACE_OPTIONS: TraceOptions = {
-  // T-cam and halo cameras often point down enough that useful tarmac begins
-  // near the top fifth of the image. Sky/material checks still decide the
-  // actual first measured row; this only prevents us discarding visible road.
-  searchTop: 0.18,
-  searchBottom: 0.98,
+  // Road on onboard/cockpit feeds starts below the horizon (~0.32-0.36)
+  // and ends ahead of the steering wheel and nosecone (~0.85).
+  searchTop: 0.32,
+  searchBottom: 0.85,
   // Asphalt is near-colourless. 0.30 admits weathered and wet tarmac (water
   // raises apparent saturation slightly) while still rejecting grass and
   // liveries, which sit far above it.
@@ -109,6 +108,7 @@ export const DEFAULT_TRACE_OPTIONS: TraceOptions = {
 
 let lumaBuf: Float32Array | null = null;
 let satBuf: Float32Array | null = null;
+let skyBuf: Uint8Array | null = null;
 let bufW = 0;
 let bufH = 0;
 
@@ -118,9 +118,10 @@ const rowFound = new Uint8Array(ROWS);
 const rowY = new Int32Array(ROWS);
 
 function ensure(w: number, h: number) {
-  if (bufW === w && bufH === h && lumaBuf) return;
+  if (bufW === w && bufH === h && lumaBuf && skyBuf) return;
   lumaBuf = new Float32Array(w * h);
   satBuf = new Float32Array(w * h);
+  skyBuf = new Uint8Array(w * h);
   bufW = w;
   bufH = h;
 }
@@ -130,34 +131,48 @@ export function warmUpLane(w: number, h: number) {
   ensure(w, h);
   lumaBuf!.fill(0);
   satBuf!.fill(0);
+  skyBuf!.fill(0);
 }
 
 /**
  * Luma and saturation over the search region only.
  *
- * Every second pixel horizontally: the boundary is being located to within a
- * pixel or two of a 384-wide image, and the corridor is hundreds of pixels
- * across. Full resolution here buys nothing and doubles the cost.
+ * Also isolates sky pixels (blue-dominant or overcast high-elevation gradients)
+ * so the road corridor and measurements strictly stay on the tarmac.
  */
 function prepare(img: ImageData, y0: number, y1: number) {
-  const { width: w, data } = img;
+  const { width: w, height: h, data } = img;
   const luma = lumaBuf!;
   const sat = satBuf!;
+  const sky = skyBuf!;
+  sky.fill(0);
+
   for (let y = y0; y <= y1; y++) {
     const row = y * w;
+    const ny = y / h;
     for (let x = 0; x < w; x += 2) {
       const i = (row + x) * 4;
       const r = data[i], g = data[i + 1], b = data[i + 2];
       const mx = r > g ? (r > b ? r : b) : g > b ? g : b;
       const mn = r < g ? (r < b ? r : b) : g < b ? g : b;
       const p = row + x;
-      luma[p] = 0.299 * r + 0.587 * g + 0.114 * b;
-      sat[p] = mx === 0 ? 0 : (mx - mn) / mx;
+      const l = 0.299 * r + 0.587 * g + 0.114 * b;
+      const s = mx === 0 ? 0 : (mx - mn) / mx;
+      luma[p] = l;
+      sat[p] = s;
+
+      // Sky detection: blue dominant or upper-frame pale sky
+      const isSky =
+        ny < 0.44 &&
+        ((b > r + 8 && b > g) || (ny < 0.38 && l > 175 && s < 0.18));
+      sky[p] = isSky ? 1 : 0;
+
       // Mirror into the odd column so the row scan can step by one without
       // branching on parity.
       if (x + 1 < w) {
-        luma[p + 1] = luma[p];
-        sat[p + 1] = sat[p];
+        luma[p + 1] = l;
+        sat[p + 1] = s;
+        sky[p + 1] = isSky ? 1 : 0;
       }
     }
   }
@@ -372,11 +387,13 @@ function scanRow(
   let sumS = 0;
   let n = 0;
 
-  /** 2 = surface, 1 = break that is still road-coloured (paint/wet/shadow), 0 = another material. */
+  /** 2 = surface, 1 = break that is still road-coloured (paint/wet/shadow), 0 = another material or sky. */
   const test = (x: number): 0 | 1 | 2 => {
     if (x < 1 || x > w - 2) return 0;
-    if (sat[row + x] > opts.maxSat) return 0;
-    return Math.abs(luma[row + x] - reference) <= tol ? 2 : 1;
+    const p = row + x;
+    if (skyBuf && skyBuf[p] === 1) return 0;
+    if (sat[p] > opts.maxSat) return 0;
+    return Math.abs(luma[p] - reference) <= tol ? 2 : 1;
   };
 
   if (cx < 1 || cx > w - 2) return null;
@@ -599,6 +616,19 @@ export function traceLane(
             (centerShare < 0.42 && sideShare > centerShare + 0.24)
           )
         ) {
+          break;
+        }
+      }
+
+      // On upward scan (approaching horizon/sky): stop when row enters sky
+      if (step < 0 && cy < 0.48 * h && skyBuf) {
+        let skyCount = 0;
+        const testRadius = Math.max(4, Math.round(w * 0.08));
+        for (let dx = -testRadius; dx <= testRadius; dx++) {
+          const tx = clamp(cx + dx, 1, w - 2);
+          if (skyBuf[cy * w + tx] === 1) skyCount++;
+        }
+        if (skyCount / (testRadius * 2 + 1) > 0.35) {
           break;
         }
       }

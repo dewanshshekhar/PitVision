@@ -21,6 +21,7 @@ import { verifyRoutes } from './routes/verify.ts';
 import { segmentRoutes } from './routes/segment.ts';
 import { streamRoutes } from './routes/stream.ts';
 import { opsRoutes } from './routes/ops.ts';
+import { pitwallRoutes } from './routes/pitwall.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -114,6 +115,7 @@ export function createApp(ctx: Ctx): express.Express {
   app.use('/api', streamRoutes(ctx));
   app.use('/api', sessionRoutes(ctx));
   app.use('/api', verifyRoutes(ctx));
+  app.use('/api', pitwallRoutes(ctx));
   // Frames go to the segmenter, so it shares the verify body limit.
   app.use('/api', segmentRoutes(ctx));
 

@@ -104,12 +104,12 @@ export function corridorFromTrace(trace: LaneTrace): Corridor {
  * this pipeline lie.
  */
 export const DEFAULT_ROAD: RoadGeometry = {
-  yTop: 0.55,
-  yBot: 0.97,
-  xTopL: 0.375,
-  xTopR: 0.625,
-  xBotL: 0.11,
-  xBotR: 0.89,
+  yTop: 0.44,
+  yBot: 0.74,
+  xTopL: 0.35,
+  xTopR: 0.65,
+  xBotL: 0.08,
+  xBotR: 0.92,
 };
 
 /**

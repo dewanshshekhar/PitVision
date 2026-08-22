@@ -24,6 +24,7 @@ import { Metrics } from './services/metrics.ts';
 import { Monitor } from './services/monitor.ts';
 import { Store } from './services/store.ts';
 import { VerificationService } from './services/verification.ts';
+import { PitWallService } from './services/pitwall.ts';
 
 const config = (() => {
   try {
@@ -49,6 +50,7 @@ const verification = new VerificationService(
   config,
   log.child({ component: 'verify' }),
 );
+const pitwall = new PitWallService(config, log.child({ component: 'pitwall' }));
 
 const ctx: Ctx = {
   config,
@@ -59,6 +61,7 @@ const ctx: Ctx = {
   monitor,
   metrics,
   verification,
+  pitwall,
   limiters: {
     verify: new RateLimiter(config.verifyRateLimit),
     ingest: new RateLimiter(config.ingestRateLimit),
